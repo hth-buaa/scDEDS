@@ -5,8 +5,7 @@
 #'
 #' @returns a
 #' @export
-#' @importFrom base sum
-#' @examples a
+#' @examples addddddddd(3,4)
 addddddddd = function(x, y) {
-  x + y
+  base::sum(x + y, x)
 }

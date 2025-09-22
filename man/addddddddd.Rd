@@ -18,5 +18,5 @@ a
 Title
 }
 \examples{
-a
+addddddddd(3,4)
 }
