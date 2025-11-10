@@ -1,0 +1,104 @@
+setwd("D:/pbmc-equation/")
+
+# cell_type = "CD14 Mono"
+cell_type = "CD4 Naive"
+# cell_type = "CD8 Naive"
+# cell_type = "CD4 TCM"
+
+### Branch Division
+if (cell_type == "CD14 Mono") {
+  branches = c("1→2", "1→3")
+} else if (cell_type == "CD4 Naive") {
+  branches = c("1→5", "1→2→3", "1→2→4")
+} else if (cell_type == "CD8 Naive") {
+  branches = c("1→9", "1→2→3→4", "1→2→3→5", "1→2→6→7", "1→2→6→8")
+} else if (cell_type == "CD4 TCM") {
+  branches = c("1→11", "1→2→10", "1→2→3→9", "1→2→3→4→8", "1→2→3→4→5→6", "1→2→3→4→5→7")
+}
+
+interest_cell_type_group <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/2.2 Data Processing - Cell Grouping/interest_cell_type_group.rds"))
+interest_cell_type_genes_pseudotime_info <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/2.2 Data Processing - Cell Grouping/interest_cell_type_genes_pseudotime_info.rds"))
+# interest_cell_type_group <- readRDS(paste0("./2.2 Data Processing - Cell Grouping/interest_cell_type_group.rds"))
+# interest_cell_type_genes_pseudotime_info <- readRDS(paste0("./2.2 Data Processing - Cell Grouping/interest_cell_type_genes_pseudotime_info.rds"))
+
+### Number of bars
+n_bar = length(interest_cell_type_group[[cell_type]][["n_min"]]); n_bar
+
+### Maximum value of the axis
+x_length = max(unlist(interest_cell_type_group[[cell_type]][["Branches_T_k"]])) + 0.5; x_length
+
+png(
+  filename = paste0("./Results/2 branch/", cell_type, " Branches Information Bar Chart.png"),
+  width = 3 * (x_length + 1.1), 
+  height = 1.8 * n_bar + 1, 
+  units = "in",
+  res = 300
+)
+
+plot(NA, type = "n", xlim = c(-0.6, x_length + 0.5), ylim = c(-1, 1.8 * n_bar), xlab = "", ylab = "", main = "", 
+     axes = F,
+     asp = NA)
+
+### Add bottom axis
+axis(side = 1, at = seq(0, x_length, by = 0.5), pos = -0.3, cex.axis = 1)
+text(0, -0.3, "Pseudotime ", cex = 1.2, adj = 1)
+
+### Color adjustment
+colors = rainbow(max(unlist(interest_cell_type_group[[cell_type]][["Branches_n_group"]])), 
+                 s = 1, v = 1, alpha = 0.3); colors
+
+### Plotting
+for (n in 1:n_bar) {
+  # Break points
+  v1 <- c(0, interest_cell_type_group[[cell_type]][["Branches_Tslot_k"]][[n]]); v1
+  v2_0 <- c(0, interest_cell_type_group[[cell_type]][["Branches_n_k"]][[n]]); v2_0
+  v2 = v2_0 / sum(v2_0) * sum(v1); v2
+  cum1 <- cumsum(v1); cum1
+  cum2 <- cumsum(v2); cum2
+  
+  # Draw rectangles
+  for (i in 1:length(v1)) {
+    x_poly <- c(cum1[i], cum1[i + 1], cum2[i + 1], cum2[i])
+    y_poly <- c(n - 1 + 0.2 * (n - 1) + 0.6 * n, n - 1 + 0.2 * (n - 1) + 0.6 * n, n + 0.2 * (n - 1) + 0.6 * n, n + 0.2 * (n - 1) + 0.6 * n)
+    polygon(x_poly, y_poly,col = colors[i], border = "black")
+  }
+  
+  # Add labels to the rectangles
+  for (i in 1:1:length(v1)) {
+    mid_x1 <- (cum1[i] + cum1[i+1]) / 2
+    text(mid_x1, n - 0.85 + 0.2 * (n - 1) + 0.6 * n, labels = round(v1, digits = 2)[i + 1], col = "black", cex = 0.8)  # Bottom line label
+    
+    mid_x2 <- (cum2[i] + cum2[i+1]) / 2
+    text(mid_x2, n - 0.15 + 0.2 * (n - 1) + 0.6 * n, labels = v2_0[i + 1], col = "black", cex = 0.8)  # Top line label
+    
+    x_center <- mean(c(cum1[i], cum1[i + 1], cum2[i + 1], cum2[i]))
+    y_center <- n - 0.5 + 0.2 * (n - 1) + 0.6 * n
+    text(x_center, y_center, labels = paste0("G", i), col = "black", cex = 1.2, font = 2)  # Center G label starting from G1
+  }
+  
+  # Add labels for the rectangle labels
+  text(0, n - 0.85 + 0.2 * (n - 1) + 0.6 * n, "Period ", col = "black", cex = 0.8, adj = 1)
+  text(0, n - 0.15 + 0.2 * (n - 1) + 0.6 * n, "Cells ", col = "black", cex = 0.8, adj = 1)
+  text(0, n - 0.5 + 0.2 * (n - 1) + 0.6 * n, paste0("Branch", n, " "), col = "black", cex = 1.2, adj = 1)
+  
+  text(sum(v1), n - 0.85 + 0.2 * (n - 1) + 0.6 * n, paste0(" ", round(sum(v1), digits = 2)), col = "black", cex = 0.8, adj = 0)
+  text(sum(v1), n - 0.15 + 0.2 * (n - 1) + 0.6 * n, paste0(" ", sum(v2_0)), col = "black", cex = 0.8, adj = 0)
+  text(sum(v1), n - 0.5 + 0.2 * (n - 1) + 0.6 * n, branches[n], col = "black", cex = 0.8, adj = 0)
+  
+  # Add State separation lines
+  states = unlist(strsplit(branches[n], "→"))
+  pseudotime_info = interest_cell_type_genes_pseudotime_info[[cell_type]][["Branches"]][[n]]
+  x_states = c(0, na.omit(as.vector(tapply(pseudotime_info$Pseudotime, pseudotime_info$State, max))))
+  for (s in 1:(length(states) + 1)) {
+    lines(x = rep(x_states[s], 2), 
+          y = c(n - 1 + 0.2 * (n - 1) + 0.6 * n - 0.4, n - 1 + 0.2 * (n - 1) + 0.6 * n), lty = "dashed")
+  }; rm(pseudotime_info)
+  
+  # Add State labels
+  x_states_pos = (x_states[-length(x_states)] + x_states[-1]) / 2
+  for (s in 1:length(x_states_pos)) {
+    text(x_states_pos[s], n - 1.2 + 0.2 * (n - 1) + 0.6 * n, paste0("S", states[s]), col = "black", cex = 0.8, adj = 0.5)
+  }
+}
+
+dev.off()
