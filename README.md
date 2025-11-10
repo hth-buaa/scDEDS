@@ -4,7 +4,7 @@
 
 ## Overview
 
-The `scDEDS` R package implements a novel framework for inferring Gene Regulatory Networks (GRNs) from paired scRNA-seq and scATAC-seq data (the cells in the two datasets are identical; or, after using other methods to establish a one-to-one correspondence, the name of these matched cells is unified). By modeling gene expression dynamics as a **Differential Equation Dynamical System (DEDS)**, `scDEDS` can predict context-specific regulatory interactions between Transcription Factors (TFs) and their Target Genes (TGs) across different cell states and pseudotemporal trajectories.
+The `scDEDS` R package implements a novel framework for inferring Gene Regulatory Networks (GRNs) from paired scRNA-seq and scATAC-seq data (the cells in the two datasets are identical; or, after using other methods to establish a one-to-one correspondence, the name of these matched cells is unified). By modeling gene expression dynamics as a **Differential Equation Dynamical System (DEDS)**, `scDEDS` can predict context-specific regulatory interactions between Transcription Factors (TFs) and their Target Genes (TGs) across different cell states and pseudotemporal trajectories. It is linked to paper *scDEDS: A Discrete Evolutionary Dynamical System for GRN Inference from Paired Single-Cell Multi-omics Data*.
 
 ### Key Features
 
@@ -59,6 +59,6 @@ The model training process is **extremely computationally intensive**.
 *   **RAM:** A big RAM is highly recommended (e.g. for data with 1000 cells and 20,000 genes, >= 64 GB is recommended, and more is of course better).
 *   **Time:** Training for one cell type may take **several days** (e.g., ~11 days for CD14 Mono in the paper on a powerful server with 200 GB RAM in WSL2).
 
-## Specific Guidelines
+## Specific Guidelines (Code, Data, and Results Availability)
 
-*   See in article_experiment_code.txt.
+*   See specific Guidelines in *article_experiment_code.txt* (it is also the code for experiment in the paper). See the experiment results of the paper in *pr50 newest for paper.7z* (including the data used in paper). See the code for figures in folder *article_figure_code*.
