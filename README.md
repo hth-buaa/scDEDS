@@ -59,8 +59,13 @@ The model training process is **extremely computationally intensive**.
 *   **RAM:** A big RAM is highly recommended (e.g. for data with 1,000 cells and 20,000 genes, >= 64 GB is recommended, and more is of course better).
 *   **Time:** Training for one cell type may take **several days** (e.g., ~11 days for CD14 Mono in the paper on a powerful server with 200 GB RAM in WSL2).
 
+## R Package
+
+*   R package is in https://github.com/hth-buaa/scDEDS/edit/main/README.md.
+
 ## Specific Guidelines (Code, Data, and Results Availability)
 
+*   Specific Guidelines (Code, Data, and Results Availability) is in https://github.com/hth-buaa/scDEDS-code-data-and-result/tree/main.
 *   See specific Guidelines in *article_experiment_R_code.txt* (it is also the code for experiment in the paper).
 *   See the experiment results of the paper in folder *article experiment result* (including the data used in paper). After the experimental process is completed, generate *code4.2.RData* in folder *4.2 BUild Prediction Model - Model Training And Evaluation*.
 *   See the code for figures and some mediate analysis results in folder *article figure and some analysis result file R code*.
