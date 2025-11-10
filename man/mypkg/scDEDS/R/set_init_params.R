@@ -1,0 +1,219 @@
+#' @title Initialize Model Parameters for Gene Regulatory Network Prediction
+#'
+#' @description
+#' This function initializes the parameter structures for the gene regulatory network prediction model scDEDS.
+#'
+#' @param interest_cell_type_branch_dataset_spilt The output of function spilt_dataset.
+#' @param ncores See in ?get_interest_cell_type_data.
+#'
+#' @returns A nested list structure containing initialized parameters for each cell type and branch.
+#'
+#' @details
+#' The function performs the following operations:
+#' \enumerate{
+#' \item Creates the directory structure for storing model training results
+#' \item Initializes all parameter structures with default values
+#' \item Sets up time-dependent parameters for each time point (K-1)
+#' \item Organizes parameters in a hierarchical structure for easy access
+#' }
+#'
+#' @note
+#' Important considerations:
+#' \itemize{
+#' \item The structure accommodates time-dependent parameters through K-1 indexing
+#' \item The function assumes the dataset has been properly partitioned beforehand
+#' \item Parameter names follow a consistent naming convention for clarity
+#' \item Initial values can be adjusted during model training and optimization
+#' }
+#'
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' ncores = parallel::detectCores() - 1 # in Linux
+#' # ncores = 1 # in Windows
+#' interest_cell_type_branch_init_params = set_init_params(
+#'   interest_cell_type_branch_dataset_spilt = interest_cell_type_branch_dataset_spilt,
+#'   ncores = ncores
+#' )
+#' }
+set_init_params = function(interest_cell_type_branch_dataset_spilt = interest_cell_type_branch_dataset_spilt,
+                           ncores = 1)
+{
+  ### Start.
+  t_start = base::Sys.time()
+  message("Run: Setting initial parameter values for all branches ", t_start, ".")
+  original_dir = base::getwd()
+  new_folder = "4.2 BUild Prediction Model - Model Training And Evaluation"
+  if (!base::dir.exists(new_folder)) {
+    base::dir.create(new_folder, recursive = TRUE)
+    message("Folder already creates: ", new_folder, ".")
+  } else {message("Folder already exists: ", new_folder, ".")}
+  base::setwd(new_folder)
+  message("The current working directory has been switched to: ", base::getwd(), ".")
+
+  ### Defining inner function.
+  set_init_params_process = function(TGs, TFs, Ks)
+  {
+    message("Initializing with a list.")
+    init_params = base::list()
+
+    message("Setting r.")
+    init_params[["r"]] = base::list()
+    message("Setting r2 in r.")
+    init_params[["r"]][["r2_TG"]] = base::list()
+    for (TG in TGs) {init_params[["r"]][["r2_TG"]][[TG]] = 1}
+    init_params[["r"]][["r2_TF"]] = base::list()
+    for (TF in TFs) {init_params[["r"]][["r2_TF"]][[TF]] = 1}
+
+    message("Setting alpha.")
+    init_params[["alpha"]] = base::list()
+    message("Setting alpha1 in alpha.")
+    init_params[["alpha"]][["alpha1_TG_K-1"]] = base::list()
+    for (TG in TGs) {
+      init_params[["alpha"]][["alpha1_TG_K-1"]][[TG]] = rep(1, base::length(Ks))
+      base::names(init_params[["alpha"]][["alpha1_TG_K-1"]][[TG]]) = Ks - 1
+    }
+    init_params[["alpha"]][["alpha1_TF_K-1"]] = base::list()
+    for (TF in TFs) {
+      init_params[["alpha"]][["alpha1_TF_K-1"]][[TF]] = rep(1, base::length(Ks))
+      base::names(init_params[["alpha"]][["alpha1_TF_K-1"]][[TF]]) = Ks - 1
+    }
+    message("Setting alpha2 in alpha.")
+    init_params[["alpha"]][["alpha2_TG_K-1"]] = base::list()
+    for (TG in TGs) {
+      init_params[["alpha"]][["alpha2_TG_K-1"]][[TG]] = rep(1, base::length(Ks))
+      base::names(init_params[["alpha"]][["alpha2_TG_K-1"]][[TG]]) = Ks - 1
+    }
+    init_params[["alpha"]][["alpha2_TF_K-1"]] = base::list()
+    for (TF in TFs) {
+      init_params[["alpha"]][["alpha2_TF_K-1"]][[TF]] = rep(1, base::length(Ks))
+      base::names(init_params[["alpha"]][["alpha2_TF_K-1"]][[TF]]) = Ks - 1
+    }
+
+    message("Setting beta.")
+    init_params[["beta"]] = base::list()
+    message("Setting beta1 in beta.")
+    init_params[["beta"]][["beta1_TG_K-1"]] = base::list()
+    for (TG in TGs) {
+      init_params[["beta"]][["beta1_TG_K-1"]][[TG]] = rep(0, base::length(Ks))
+      base::names(init_params[["beta"]][["beta1_TG_K-1"]][[TG]]) = Ks - 1
+    }
+    init_params[["beta"]][["beta1_TF_K-1"]] = base::list()
+    for (TF in TFs) {
+      init_params[["beta"]][["beta1_TF_K-1"]][[TF]] = rep(0, base::length(Ks))
+      base::names(init_params[["beta"]][["beta1_TF_K-1"]][[TF]]) = Ks - 1
+    }
+    message("Setting beta2 in beta.")
+    init_params[["beta"]][["beta2_TG_K-1"]] = base::list()
+    for (TG in TGs) {
+      init_params[["beta"]][["beta2_TG_K-1"]][[TG]] = rep(0, base::length(Ks))
+      base::names(init_params[["beta"]][["beta2_TG_K-1"]][[TG]]) = Ks - 1
+    }
+    init_params[["beta"]][["beta2_TF_K-1"]] = base::list()
+    for (TF in TFs) {
+      init_params[["beta"]][["beta2_TF_K-1"]][[TF]] = rep(0, base::length(Ks))
+      base::names(init_params[["beta"]][["beta2_TF_K-1"]][[TF]]) = Ks - 1
+    }
+    message("Setting beta3 in beta.")
+    init_params[["beta"]][["beta3_TG_K-1"]] = base::list()
+    for (TG in TGs) {
+      init_params[["beta"]][["beta3_TG_K-1"]][[TG]] = rep(0, base::length(Ks))
+      base::names(init_params[["beta"]][["beta3_TG_K-1"]][[TG]]) = Ks - 1
+    }
+
+    message("Setting s.")
+    init_params[["s"]] = base::list()
+    message("Setting s1 in s.")
+    init_params[["s"]][["s1_TG"]] = base::list()
+    for (TG in TGs) {init_params[["s"]][["s1_TG"]][[TG]] = 1}
+    init_params[["s"]][["s1_TF"]] = base::list()
+    for (TF in TFs) {init_params[["s"]][["s1_TF"]][[TF]] = 1}
+    message("Setting s2 in s.")
+    init_params[["s"]][["s2_TG"]] = base::list()
+    for (TG in TGs) {init_params[["s"]][["s2_TG"]][[TG]] = 1}
+    init_params[["s"]][["s2_TF"]] = base::list()
+    for (TF in TFs) {init_params[["s"]][["s2_TF"]][[TF]] = 1}
+
+    message("Setting u.")
+    init_params[["u"]] = base::list()
+    message("Setting u1 in u.")
+    init_params[["u"]][["u11_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u11_TG"]][[TG]] = 1}
+    init_params[["u"]][["u21_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u21_TG"]][[TG]] = 1}
+    init_params[["u"]][["u311_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u311_TG"]][[TG]] = 1}
+    init_params[["u"]][["u321_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u321_TG"]][[TG]] = 1}
+    init_params[["u"]][["u331_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u331_TG"]][[TG]] = 1}
+    message("Setting u2 in u.")
+    init_params[["u"]][["u12_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u12_TG"]][[TG]] = 1}
+    init_params[["u"]][["u22_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u22_TG"]][[TG]] = 1}
+    init_params[["u"]][["u312_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u312_TG"]][[TG]] = 1}
+    init_params[["u"]][["u322_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u322_TG"]][[TG]] = 1}
+    init_params[["u"]][["u332_TG"]] = base::list()
+    for (TG in TGs) {init_params[["u"]][["u332_TG"]][[TG]] = 1}
+
+    message("Setting E~.")
+    init_params[["E~"]] = base::list()
+    message("Setting E~_TG in E~.")
+    init_params[["E~"]][["E~_TG_K-1"]] = base::list()
+    for (TG in TGs) {
+      init_params[["E~"]][["E~_TG_K-1"]][[TG]] = rep(4.5, base::length(Ks))
+      base::names(init_params[["E~"]][["E~_TG_K-1"]][[TG]]) = Ks - 1
+    }
+    message("Setting E~_TF in E~.")
+    init_params[["E~"]][["E~_TF_K-1"]] = base::list()
+    for (TF in TFs) {
+      init_params[["E~"]][["E~_TF_K-1"]][[TF]] = rep(4.5, base::length(Ks))
+      base::names(init_params[["E~"]][["E~_TF_K-1"]][[TF]]) = Ks - 1
+    }
+
+    message("Setting v.")
+    init_params[["v"]] = base::list()
+    message("Setting v1 in v.")
+    init_params[["v"]][["v1_TG"]] = base::list()
+    for (TG in TGs) {init_params[["v"]][["v1_TG"]][[TG]] = 1}
+    message("Setting v2 in v.")
+    init_params[["v"]][["v2_TG"]] = base::list()
+    for (TG in TGs) {init_params[["v"]][["v2_TG"]][[TG]] = 1}
+    message("Setting v3 in v.")
+    init_params[["v"]][["v3_TG"]] = base::list()
+    for (TG in TGs) {init_params[["v"]][["v3_TG"]][[TG]] = 1}
+
+    return(init_params)
+  }
+
+  ### Iterating over each cell type to execute inner function.
+  interest_cell_type_branch_init_params = base::list()
+  for (cell_type in base::names(interest_cell_type_branch_dataset_spilt)) {
+    message("Setting initial parameter values for the data of cell type ", cell_type, ".")
+    interest_cell_type_branch_init_params[[cell_type]] = base::list()
+    interest_cell_type_branch_init_params[[cell_type]] = parallel::mclapply(
+      X = 1 : (base::length(interest_cell_type_branch_dataset_spilt[[cell_type]]) - 1),
+      FUN = function(n) {
+        message("Setting initial parameter values for the data of branch ", n, " of cell type ", cell_type, ".")
+        set_init_params_process(
+          TGs = base::sort(base::unique(interest_cell_type_branch_dataset_spilt[[cell_type]][[n]][, "TG"])),
+          TFs = base::sort(base::unique(interest_cell_type_branch_dataset_spilt[[cell_type]][[n]][, "TF"])),
+          Ks = 2 : base::sum(base::grepl("TFE_", base::colnames(interest_cell_type_branch_dataset_spilt[[cell_type]][[n]])))
+        )},
+      mc.cores = ncores
+    )
+  }
+
+  ### End.
+  base::setwd(original_dir)
+  message("The current working directory has been switched to: ", base::getwd(), ".")
+  t_end = base::Sys.time()
+  message("Finish: Setting initial parameter values for all branches ", t_end, ".")
+  message("Running time: ")
+  base::print(t_end - t_start)
+  return(interest_cell_type_branch_init_params)
+}

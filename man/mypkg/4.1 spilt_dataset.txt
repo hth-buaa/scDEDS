@@ -1,0 +1,250 @@
+#' @title Split Dataset into Training, Validation, and Test Sets
+#'
+#' @description
+#' This function performs stratified sampling to partition gene regulatory network data into training, validation, and test sets.
+#' It ensures comprehensive coverage of all transcription factors (TFs) and target genes (TGs) in the training set to ensuring continuous coverage of all positive samples during model training.
+#'
+#' @param interest_cell_type_branch_sGRN The output of function get_branch_sGRN.
+#' @param prop
+#' Numeric vector of length 2. Proportion of samples for training and validation sets respectively.
+#' The remaining proportion (1 - sum(prop)) will be used for testing. Default is c(0.7, 0.15).
+#' @param set_seed Numeric. Random seed for reproducible sampling. Default is a random uniform value.
+#' @param interest_cell_type_group The output of function cell_grouping.
+#' @param ncores See in ?get_interest_cell_type_data.
+#'
+#' @returns
+#' A nested list structure organized by cell type and branch, containing:
+#' \itemize{
+#' \item For each branch: A data frame with partitioned datasets including:
+#' \itemize{
+#' \item \code{dataset}: Indicator of dataset partition ("training_set", "validation_set", "test_set")
+#' \item \code{TG}: Target gene identifier
+#' \item \code{TF}: Transcription factor identifier
+#' \item \code{theta_s}: Regulatory strength from sGRN
+#' \item \code{TFE_K}, \code{TGA_K}, \code{TGE_K}: Cell group state features for each time point
+#' }\item An "all" element containing the combined dataset across all branches
+#' }
+#' The partitioning ensures all TFs and TGs are represented in the training set.
+#'
+#' @details
+#' The function performs the following key operations:
+#' \enumerate{
+#' \item Sets random seed for reproducible sampling
+#' \item Generates all possible TG-TF combinations with regulatory strength scores
+#' \item Performs stratified sampling to maintain class balance (positive/negative samples)
+#' \item Verifies comprehensive coverage of all TFs and TGs in training set
+#' \item Adds cell group state features (TFE, TGA, TGE) for each time point
+#' \item Returns organized datasets ready for machine learning model training
+#' }
+#'
+#' @section Sampling Strategy:
+#' The function uses stratified sampling to ensure:
+#' \itemize{
+#' \item Positive samples (theta_s > 0) and negative samples (theta_s = 0) are proportionally represented
+#' \item All TFs and TGs appear in the training set (through resampling if necessary)
+#' \item The specified proportions are maintained across all partitions
+#' }
+#'
+#' @note
+#' Important considerations:
+#' \itemize{
+#' \item If the GRN has insufficient positive samples, sampling may fail after 100 attempts
+#' \item The function includes a resampling mechanism to ensure comprehensive training set coverage
+#' \item Cell group state features are added for each time point, providing temporal context
+#' \item Uses parallel processing for efficient handling of multiple cell types
+#' \item Setting a fixed seed ensures reproducible dataset partitioning
+#' }
+#'
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' prop = c(0.7, 0.15) # c(0.7, 0.2)
+#' set_seed = 123 # Reproducible
+#' # set_seed = stats::runif(1) # Not Reproducible
+#' ncores = parallel::detectCores() - 1 # in Linux
+#' # ncores = 1 # in Windows
+#' interest_cell_type_branch_dataset_spilt = spilt_dataset(
+#'   interest_cell_type_branch_sGRN = interest_cell_type_branch_sGRN,
+#'   prop = prop,
+#'   set_seed = set_seed,
+#'   interest_cell_type_group = interest_cell_type_group,
+#'   ncores = ncores
+#' )
+#' }
+spilt_dataset = function(interest_cell_type_branch_sGRN = interest_cell_type_branch_sGRN,
+                         prop = c(0.7, 0.15),
+                         set_seed = stats::runif(1),
+                         interest_cell_type_group = interest_cell_type_group,
+                         ncores = 1)
+{
+  ### Start.
+  t_start = base::Sys.time()
+  message("Run: Partitioning Training, Validation, and Test Sets ", t_start, ".")
+  original_dir = base::getwd()
+  new_folder = "4.1 Build Prediction Model - Split Dataset Into Training, Validation, Test Set"
+  if (!base::dir.exists(new_folder)) {
+    base::dir.create(new_folder, recursive = TRUE)
+    message("Folder already creates: ", new_folder, ".")
+  } else {message("Folder already exists: ", new_folder, ".")}
+  base::setwd(new_folder)
+  message("The current working directory has been switched to: ", base::getwd(), ".")
+
+  ### Defining inner function.
+  spilt_dataset_process = function(branch_GRN,
+                                   prop = c(0.7, 0.15),
+                                   set_seed = stats::runif(1),
+                                   TFE_T, TGA_T, TGE_T)
+  {
+    # Setting random seed.
+    message("Setting random seed.")
+    base::set.seed(set_seed)
+
+    # Generating all row-column (TG-TF) combinations, and adding regulatory strength theta for each TG_TF pair.
+    message("Generating all row-column (TG-TF) combinations, and adding regulatory strength theta for each TG_TF pair.")
+    n_branch = base::length(branch_GRN)
+    all_combinations = base::list()
+    for(n in 1:n_branch) {
+      all_combinations[[base::paste0("branch_", n,"_GRN")]] = base::expand.grid(
+        TG = base::rownames(branch_GRN[[n]]),
+        TF = base::colnames(branch_GRN[[n]]),
+        stringsAsFactors = FALSE
+      )
+      all_combinations[[base::paste0("branch_", n,"_GRN")]]$theta_s = apply(
+        all_combinations[[base::paste0("branch_", n,"_GRN")]],
+        1,
+        function(x) branch_GRN[[n]][x[1], x[2]]
+      )
+    }
+    all_combinations[["GRN"]] = base::do.call(rbind, all_combinations)
+    all_combinations[["GRN"]] = all_combinations[["GRN"]][!base::duplicated(all_combinations[["GRN"]]), ]
+
+    # Defining a Stratified Sampling Function.
+    stratified_split = function(data, prop, set_name)
+    {
+      message("Distinguishing positive samples (values > 0 in sGRN) from negative samples (values = 0 in sGRN).")
+      neg_samples = base::subset(data, theta_s == 0)
+      pos_samples = base::subset(data, theta_s != 0)
+      n_neg = base::nrow(neg_samples)
+      n_pos = base::nrow(pos_samples)
+      message("The number of positive samples is ", n_pos, ", and the number of negative samples is ", n_neg, ".")
+
+      message("Calculate the number of positive and negative samples in the training, validation, and test sets.")
+      message("The training set proportion is ", prop[1], ", the validation set proportion is ", prop[2], ", and the test set proportion is ", 1 - prop[1] - prop[2], ".")
+      train_neg = base::round(prop[1] * n_neg)
+      val_neg = base::round(prop[2] * n_neg)
+      test_neg = n_neg - train_neg - val_neg
+
+      train_pos = base::round(prop[1] * n_pos)
+      val_pos = base::round(prop[2] * n_pos)
+      test_pos = n_pos - train_pos - val_pos
+      message("The training set contains ", train_pos, ", positive and ", train_neg, " negative samples.")
+      message("The validation set contains ", val_pos, " positive and ", val_neg, " negative samples.")
+      message("The test set contains ", test_pos, " positive and ", test_neg, " negative samples.")
+
+      message("Random sampling.")
+      neg_samples = neg_samples[base::sample(base::nrow(neg_samples)), ]
+      pos_samples = pos_samples[base::sample(base::nrow(pos_samples)), ]
+
+      message("Allocating datasets.")
+      base::list(
+        training_set = base::rbind(neg_samples[1 : train_neg, ], pos_samples[1 : train_pos, ]),
+        validation_set = base::rbind(neg_samples[(train_neg + 1) : (train_neg + val_neg), ],
+                                     pos_samples[(train_pos + 1) : (train_pos + val_pos), ]),
+        test_set = base::rbind(neg_samples[(train_neg + val_neg + 1) : base::nrow(neg_samples), ],
+                               pos_samples[(train_pos + val_pos + 1) : base::nrow(pos_samples), ])
+      )
+    }
+
+    # Executing stratified partitioning.
+    splits_GRN = stratified_split(all_combinations[["GRN"]], prop = prop, set_name = "dataset")
+
+    # Consolidating results.
+    splits_GRN = base::data.frame(
+      dataset = c(base::rep("training_set", base::nrow(splits_GRN$training_set)),
+                  base::rep("validation_set", base::nrow(splits_GRN$validation_set)),
+                  base::rep("test_set", base::nrow(splits_GRN$test_set))),
+      base::rbind(splits_GRN$training_set[, c("TG", "TF", "theta_s")],
+                  splits_GRN$validation_set[, c("TG", "TF", "theta_s")],
+                  splits_GRN$test_set[, c("TG", "TF", "theta_s")])
+    )
+    base::rownames(splits_GRN) = base::paste0("TG_", splits_GRN$TG, "~", splits_GRN$TF, "_TF")
+    training_set_result = splits_GRN[splits_GRN$dataset == "training_set", c("TG", "TF")]
+
+    # Verify that the sampling result ensures comprehensive coverage of all TFs and TGs in the training set.
+    message("Verifying that the sampling result ensures comprehensive coverage of all TFs and TGs in the training set.")
+    n_resample = 0
+    while (!base::identical(base::sort(base::unique(training_set_result$TG)),
+                            base::sort(base::unique(splits_GRN$TG))) &&
+           !base::identical(base::sort(base::unique(training_set_result$TF)),
+                            base::sort(base::unique(splits_GRN$TF)))) {
+      n_resample = n_resample + 1
+      if (n_resample > 100) {
+        stop("Sampling failed: Unable to cover all TGs and TFs. Please use a GRN with more positive samples or increase the training set proportion.")
+      } else {
+        message("Training set sampling does not cover all TFs and TGs. Performing ", n_resample, "-th resampling attempt.")
+        splits_GRN = stratified_split(all_combinations, prop = prop, set_name = "dataset")
+        splits_GRN = base::data.frame(
+          dataset = c(base::rep("training_set", base::nrow(splits_GRN$training_set)),
+                      base::rep("validation_set", base::nrow(splits_GRN$validation_set)),
+                      base::rep("test_set", base::nrow(splits_GRN$test_set))),
+          base::rbind(splits_GRN$training_set[, c("TG", "TF", "theta_s")],
+                      splits_GRN$validation_set[, c("TG", "TF", "theta_s")],
+                      splits_GRN$test_set[, c("TG", "TF", "theta_s")])
+        )
+        base::rownames(splits_GRN) = base::paste0("TG_", splits_GRN$TG, "~", splits_GRN$TF, "_TF")
+        training_set_result = splits_GRN[splits_GRN$dataset == "training_set", c("TG", "TF")]
+      }
+    }
+
+    # Adding cell group states (TFE, TGA, TGE).
+    message("Adding cell group states (TFE, TGA, TGE).")
+    splits_branch_GRN = base::list()
+    for(n in 1:n_branch) {
+      splits_branch_GRN[[base::paste0("branch", n)]] = splits_GRN[base::paste0(
+        "TG_",
+        all_combinations[[base::paste0( "branch_", n, "_GRN")]][["TG"]],
+        "~",
+        all_combinations[[base::paste0("branch_", n, "_GRN")]][["TF"]],
+        "_TF"
+      ), ]
+      for (TG_TF in base::rownames(splits_branch_GRN[[base::paste0("branch", n)]])) {
+        TG = sub(".*_([^~]+)~.*", "\\1", TG_TF)
+        TF = sub(".*~([^_]+)_.*", "\\1", TG_TF)
+        for (K in 1:ncol(TFE_T[[n]])) {
+          splits_branch_GRN[[base::paste0("branch", n)]][TG_TF, base::paste0("TFE_", K)] = TFE_T[[n]][TF, K]
+          splits_branch_GRN[[base::paste0("branch", n)]][TG_TF, base::paste0("TGA_", K)] = TGA_T[[n]][TG, K]
+          splits_branch_GRN[[base::paste0("branch", n)]][TG_TF, base::paste0("TGE_", K)] = TGE_T[[n]][TG, K]
+        }
+      }
+    }
+    splits_branch_GRN[["all"]] = splits_GRN
+
+    return(splits_branch_GRN)
+  }
+
+  ### Invoking this function in parallel.
+  interest_cell_type_branch_dataset_spilt = parallel::mclapply(
+    X = base::names(interest_cell_type_branch_sGRN),
+    FUN = function(cell_type) {
+      message("Partitioning Training, Validation, and Test Sets from the data of ", cell_type, ".")
+      spilt_dataset_process(
+        branch_GRN = interest_cell_type_branch_sGRN[[cell_type]],
+        prop = prop,
+        set_seed = set_seed,
+        TFE_T = interest_cell_type_group[[cell_type]][["Branches_TFE_T"]],
+        TGA_T = interest_cell_type_group[[cell_type]][["Branches_TGA_T"]],
+        TGE_T = interest_cell_type_group[[cell_type]][["Branches_TGE_T"]]
+      )},
+    mc.cores = ncores)
+  base::names(interest_cell_type_branch_dataset_spilt) = base::names(interest_cell_type_branch_sGRN)
+
+  ### End.
+  base::setwd(original_dir)
+  message("The current working directory has been switched to: ", base::getwd(), ".")
+  t_end = base::Sys.time()
+  message("Finish: Partitioning Training, Validation, and Test Sets ", t_end, ".")
+  message("Running time: ")
+  base::print(t_end - t_start)
+  return(interest_cell_type_branch_dataset_spilt)
+}

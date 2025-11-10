@@ -1,0 +1,109 @@
+#' @title Comprehensive Binary Classification Model Evaluation
+#'
+#' @description
+#' This function performs a comprehensive evaluation of binary classification models by computing multiple performance metrics from predicted and actual labels.
+#' It calculates standard classification metrics, advanced statistical measures, and ROC analysis to provide a holistic view of model performance.
+#'
+#' @param pred_vec Numeric vector. Predicted binary labels (0 or 1) from a classification model. This vector has the same dimension as stand_vec.
+#' @param stand_vec Numeric vector. Actual ground truth binary labels (0 or 1). This vector has the same dimension as pred_vec
+#'
+#' @returns
+#' A named numeric vector containing 15 performance metrics:
+#' \itemize{
+#' \item \code{TP}: True Positives
+#' \item \code{TN}: True Negatives
+#' \item \code{FP}: False Positives
+#' \item \code{FN}: False Negatives
+#' \item \code{Accuracy}: Overall accuracy (TP+TN)/(TP+TN+FP+FN)
+#' \item \code{Recall}: Sensitivity/True Positive Rate (TP/(TP+FN))
+#' \item \code{Precision}: Positive Predictive Value (TP/(TP+FP))
+#' \item \code{Specificity}: True Negative Rate (TN/(TN+FP))
+#' \item \code{NegPredRate}: Negative Predictive Value (TN/(TN+FN))
+#' \item \code{Kappa}: Cohen's Kappa statistic (agreement beyond chance)
+#' \item \code{F1}: F1 Score (harmonic mean of precision and recall)
+#' \item \code{Prevalence}: Proportion of actual positives in dataset
+#' \item \code{DetectionRate}: Proportion of correctly detected positives
+#' \item \code{BalancedAccuracy}: Average of recall and specificity
+#' \item \code{auc}: Area Under the ROC Curve
+#' }
+#'
+#' @details
+#' The function implements the following evaluation methodology:
+#' \enumerate{
+#' \item Confusion Matrix: Computes the confusion matrix to get TP, TN, FP, FN counts
+#' \item Basic Metrics: Calculates accuracy, recall, precision, specificity, and NPV
+#' \item Advanced Metrics: Computes Cohen's Kappa, F1 score, prevalence, detection rate, and balanced accuracy
+#' \item ROC Analysis: Uses the \code{pROC} package to calculate AUC
+#' }
+#' All metrics include a small epsilon (1e-8) in denominators to prevent division by zero.
+#' This ensures numerical stability while maintaining metric accuracy.
+#'
+#' @note
+#' Important considerations:
+#' \itemize{
+#' \item Input vectors must contain only binary values (0 and 1)
+#' \item The function assumes 0 represents the negative class and 1 the positive class
+#' \item Kappa values range from -1 (worse than random) to 1 (perfect agreement)
+#' \item AUC values range from 0 (uncommon and worse than random guessing) to 1 (perfect classifier), with 0.5 representing a random classifier
+#' \item Balanced accuracy is particularly useful for imbalanced datasets
+#' \item The function requires the \code{pROC} package for AUC calculation
+#' }
+#'
+#' @seealso \code{\link[pROC]{roc}}, \code{\link[base]{table}}
+#'
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' # Create sample predicted and actual labels
+#' predictions <- c(1, 0, 1, 1, 0, 1, 0, 0)
+#' actuals <- c(1, 0, 0, 1, 0, 1, 1, 0)
+#' # Evaluate model performance
+#' results <- model_evaluate(pred_vec = predictions, stand_vec = actuals)
+#' }
+model_evaluate = function(pred_vec, stand_vec)
+{
+  # Computing confusion matrix.
+  confuse_matrix = base::table(Predicted = pred_vec, Actual = stand_vec)
+  TN = confuse_matrix["0", "0"]
+  FP = confuse_matrix["1", "0"]
+  FN = confuse_matrix["0", "1"]
+  TP = confuse_matrix["1", "1"]
+
+  # Calculate Accuracy, Sensitivity (Recall), Positive Predictive Value (Precision), Specificity, Negative Predictive Value.
+  Accuracy = (TP + TN) / (TP + TN + FP + FN + 0.00000001) # Accuracy: Proportion of all correct predictions.
+  Recall = TP / (TP + FN + 0.00000001) # Sensitivity (Recall): Proportion of actual positives correctly identified.
+  Precision = TP / (TP + FP + 0.00000001) # Positive Predictive Value (Precision): Proportion of positive predictions that are actual positives.
+  Specificity = TN / (TN + FP + 0.00000001) # Specificity: Proportion of actual negatives correctly identified.
+  NegPredRate = TN / (TN + FN + 0.00000001) # Negative Predictive Value: Proportion of negative predictions that are actual negatives.
+
+  # Calculate Kappa statistic, F1 score, Prevalence, Detection Rate, and Balanced Accuracy.
+  calculate_kappa = function(TP, TN, FP, FN) {
+    total = TP + TN + FP + FN + 0.00000001 # Calculate total sample size.
+    P_o = (TP + TN) / total # Calculate observed agreement rate P_o (i.e., Accuracy).
+    P_e = ((TP + FP) * (TP + FN) + (FN + TN) * (FP + TN)) / (total^2) # Calculate expected random agreement rate P_e.
+    kappa = (P_o - P_e + 0.00000001) / (1 - P_e + 0.00000001) # Compute Kappa coefficient.
+    return(kappa)
+  }
+  Kappa = calculate_kappa(TP, TN, FP, FN) # Kappa statistic: Measures classifier agreement beyond random chance; values closer to 1 indicate better performance (negative values indicate worse than random). Formula: (Accuracy - ExpectedAccuracy) / (1 - ExpectedAccuracy)
+  F1 = 2 * (Precision * Recall) / (Precision + Recall + 0.00000001) # F1 Score: Harmonic mean of Precision and Recall (F1 becomes NaN if Precision or Recall is 0)
+  Prevalence = (TP + FN) / (TP + TN + FP + FN + 0.00000001) # Prevalence: Proportion of actual positive cases in the total sample
+  DetectionRate = TP / (TP + TN + FP + FN + 0.00000001) # Detection Rate: Proportion of correctly predicted positives relative to the total sample
+  BalancedAccuracy = (Recall + Specificity) / 2 # Balanced Accuracy: Average of Sensitivity (Recall) and Specificity
+
+  roc_obj = pROC::roc(stand_vec, pred_vec, levels = c(0, 1)) # Calculate ROC object.
+  auc_value = pROC::auc(roc_obj) # Extract AUC value.
+
+  evaluate_result = c(
+    TP, TN, FP, FN,
+    Accuracy, Recall, Precision, Specificity, NegPredRate,
+    Kappa, F1, Prevalence, DetectionRate, BalancedAccuracy, auc_value
+  )
+  base::names(evaluate_result) =  c(
+    "TP", "TN", "FP", "FN",
+    "Accuracy", "Recall", "Precision", "Specificity", "NegPredRate",
+    "Kappa", "F1", "Prevalence", "DetectionRate", "BalancedAccuracy", "auc"
+  )
+
+  return(evaluate_result)
+}

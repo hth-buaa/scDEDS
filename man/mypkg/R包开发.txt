@@ -1,0 +1,379 @@
+############### 1 准备工作 ###############
+library(usethis)
+library(devtools)
+library(roxygen2)
+?has_devel
+devtools::has_devel()
+
+R包命名以字母开头，只能包含字母、数字、点，不能和已有包名冲突（CRAN和bioconductor）
+网站查找
+CRAN包：https://cran.r-project.org/web/packages/available_packages_by_name.html
+bioconductor包：https://bioconductor.org/packages/release/BiocViews.html#___Software
+命令查找
+available.packages()
+BiocManager::available()
+
+
+
+############### 2 创建空包 ###############
+dir.create("D:/pbmc-equation/mypkg")
+# setwd("D:/pbmc-equation/mypkg")
+setwd("/mnt/d/pbmc-equation/mypkg")
+# setwd("/mnt/d/pbmc-equation/mypkg/scDEDS/")
+
+usethis::create_package("scDEDS", open = FALSE) 
+usethis::create_package("hthpkg", open = FALSE) # 在工作路径下创建文件夹"hthpkg"，动生成一个符合 R 包标准的目录结构和必要的元数据文件
+1、R文件夹：存放R代码文件夹，重要
+R包的心脏，所写所有函数都在此处
+里面的文件都是R脚本，也就是扩展名为.R的文件
+每个文件都包含一个函数、一个函数和它的辅助函数或一个函数家族
+R包内的文件夹不支持二级目录，也就是R文件夹下不能再有下一级目录，如果函数较大，打理起来比较麻烦
+2、.gitignore文件：存放git信息的文件，会被沪铝
+3、.Rbuildignore文件；build包是会忽略的文件，会被忽略
+4、DESCRIPTION文件：R包的说明文档，重要
+包含包的描述信息（人类和机器都能读取的格式，会展示在CRAN，是包的灵魂）
+一个有格式的文本文件（DFC：Debian control format）
+每行由字段名称、冒号和后面的值组成
+5、hthpak.Rproj文件：RStudio的项目文件，以后编辑R包的时候看，通过打开它来编辑，因为它包含了创建R包的菜单，重要
+6、NAMESPACE文件：存放R包函数命名空间的文件，不需要手动编辑，极其重要
+一个文本文件，无需手动编辑
+一个list，一行一个，通常有Roxygen2完成
+7、R包中的其他文件夹
+除了上面提到的R文件夹，还有data文件夹和vignette文件夹
+data文件夹不会自动产生，需要使用use_data()来添加R数据，也可以手动创建
+vignette文件夹是用来添加markdown格式的说明文档，需要使用函数use_vignette()来创建，但需要安装knitr包、rmarkdown包、和pandoc，前两者使用install.packages()安装pandoc安装参考网站https://pandoc.org/installing.html
+
+
+
+############### 3 封装R包 ###############
+2个步骤：写入注释和建包
+3重实现方式：菜单、命令和快捷键
+
+
+########## 3.1 打开项目文件 ##########
+单机hthpkg.Rproj
+和RStudio平常的界面不同，在菜单栏多了Build，这里包含了封装R包常用的功能
+
+
+########## 3.2 通过菜单封装包 ##########
+##### 3.2.1 写入注释 #####
+在Build菜单下，单机document项
+在Build窗口中可以看到：更新文档，载入hthpkg包，最后完成更新
+
+##### 3.2.2 建包 #####
+写好注释后，就是建包，使用build菜单下的Install Package、Install and Restart或者Clean and Rebuild
+右上角Build框中显示此包封装到'D:/R-4.4.3/library/_build'
+最后提示DONE (hthpkg)，说明安装成功
+控制台自动显示> library(hthpkg)，说明也调用了此包，已经可以使用此包了、右下角Packages中搜索hthpkg会有显示
+
+
+########## 3.3 通过快捷键封装包 ##########
+写入注释：Ctrl/Command+Shift+D，D——document
+建包：Ctrl/Command+Shift+B，B——build
+
+
+########## 3.4 通过命令封装包 ##########
+不论是快捷键还是菜单，本质上都是调用devtools包中的document()函数和build()函数
+学会使用命令封装很重要，因为有一些信息仅在使用命令的时候才会给出
+写入注释：devtools::docmuent()
+建包：devtools::build()
+使用命令封装包的信息，不会在build窗口中显示，而是在控制台中显示
+
+【插入】
+使用
+ devtools::check()
+对您的包进行​​完整的检查​​，这能帮助您发现更多潜在的问题，例如文档缺失、依赖关系不完整等
+
+########## 3.5 调用R包 ##########
+封装完R包后，就可以使用library()命令来调用此包
+没有任何报错信息，说明hthpkg包制作成功
+在Package窗口中，也可以找到此包
+
+
+
+############### 4 函数注释 ###############
+使用roxygen2
+
+
+########## 4.1 插入注释框架 ##########
+双击打开项目文件hthpkg。Rproj
+首先，打开R脚本（Untitled1）写一个标准函数
+# eg.
+add = function(x, y) {
+  x + y
+}
+
+将它保存在R文件夹下（Ctrl+s），文件名为XXX.R，R语言代码文件的扩展名那个必须是R，而文件名不一定要和函数名一样，可以是XXXO.R或XX.R（命名为add.R），但不能是中文
+进入D:/pbmc-equation/mypkg/hthpkg/R，发现了add.R
+
+插入注释框架主要有2种方法：菜单插入、快捷键插入，不管哪一种，都要先将光标定位在函数内部，只有在函数内部，RStuidio才能识别这是一个函数
+
+##### 4.1.1 菜单插入 #####
+首先，将光标定位在函数内部（光标闪烁在x+y这一行），然后依次点击菜单栏的Code、insert Roxygen Skeleton，就插入了注释框架
+
+##### 4.1.2 快捷键插入 #####
+首先，将光标定位在函数内部（光标闪烁在x+y这一行），然后使用快捷键Ctrl+Alt+Shift+R即可插入
+
+
+########## 4.2 注释撰写 ##########
+普通的注释以【井号#】开头，二注释函数以【井号和单引号#'】开头，并且后接一个【空格】
+每一个区域的指定，都是以“@”开头
+
+##### 4.21 标题 #####
+第一行如果不指定，默认是标题title，也可以使用@title指定
+书写标题时，需要在@title后空一格，标题要能准确反映出函数的功能，要注意首字母的大小写
+
+##### 4.2.2 描述 #####
+函数的描述部分并不是必须的，所以默认是不会插入这部分的，如果缺少了描述部分，R会自动用标题来代替
+
+使用@description来指定描述区域
+描述部分必须是一整个段落，这意味着必须以句号（也就是点）来结尾
+如果内容多，可以换行，每行最好不超过80个字符，并且换行后要以4个空格开头
+
+如果description部分写得不够爽，还可以咋#details部分进一步详细书写
+
+##### 4.2.3 参数 #####
+使用@param来指定参数部分，@param后空一格，写参数的名称，再空一格，写参数的解释，参数的解释不能为空
+
+##### 4.2.4 链接到其他函数 #####
+有时候，或许我们并不需要把某一个参数的注释写得过于详细，因为其他地方有非常完备的说明，那么就可以使用\code{\link[pkg]{rdname}}这种形式来进行引用（如果是base环境下的函数，包名写base即可）
+
+##### 4.2.5 返回 #####
+使用@return来说明函数的返回内容
+
+##### 4.2.6 导出函数 #####
+如果函数是要分享出来和别人一起使用的，那么就需要将函数从包内到处，在注释部分添加@export即可，后面不需要写任何内容
+如果函数仅在包内使用，则不需要添加@export，删除即可
+
+##### 4.2.7 引用函数 #####
+如果想引用其他包中的函数，则需要使用@importFrom，写法是@importFrom+包名+函数名（一个或多个）
+如果引用base包中的sum函数，则@importFrom base sum
+
+##### 4.2.8 示例 #####
+每个函数都应该有1个示例，使用@examples来指定示例部分，如@examples add(1, 2)
+如果示例不能够被运行，或者运行时间过长，在CRAN检测时不能被通过，可以使用\donttest{}使示例在检测是被自动忽略
+\donttest{
+add(3, 4)
+}
+
+
+########## 4.3 转义注释 ##########
+函数注释写完之后，它并不能被R自动识别，需要将其转义才可以
+转义方法在前面【封装包】中已经讲解，可以使用快捷键Ctrl/Command+Shift+D或控制台输入命令devtools::document()（推荐），还可以使用菜单Build、document
+转义后可以看到写入了一个Rd文件，也就是R document文件，文件名是add.Rd（在mypkg文件夹中的man文件夹下，可点击查看，但不要编辑）
+转义完之后，再次封装包即可（使用devtools::build()）
+
+至此，创建包、写函数、写注释、转义注释、封装包都已完成
+
+尝试
+?hthpkg::add
+
+
+############### 5 引用R包函数 ###############
+不同函数可以进行复杂的合作，并不是所有函数都需要从头写起
+
+
+########## 5.1 引用CRAN包 ##########
+使用usethis包中的use_packages()函数来指定引用包，use_package()函数中总共有3个参数package、type和min_version，package表示我们要引用包的名称，type表示要引用的额类型（常用的引用类型有imports、Depends和Suggests），min_version表示包的最小版本号
+例如，在hthpkg包引用stats包，那么package就等于"stats"
+
+如果只需要引用stats包中的某个函数，而不是整个stats包，那么引用类型就是imports，命令如下（R脚本或控制台）：
+usethis::use_package(package = "stats", type = "Imports")
+✔ Setting active project to "D:/pbmc-equation/mypkg/hthpkg".
+✔ Adding stats to Imports field in DESCRIPTION.
+☐ Refer to functions with `stats::fun()`.
+我们看到Adding 'stats' to Imports field in DESCRIPTION，意思是将stats包添加在DESCRIPTION文件中的Imports部分，打开mypkg/DESCRIPTION文件，可以看到多了Imports部分，而且下面有stats
+引用stats包中的函数则使用命令 `stats::fun()`
+
+如果需要使用整个stats包，也就是hthpkg包功能的实现完全依赖于stats包，而不是仅仅使用某个函数，type等于"Depends"，命令如下
+usethis::use_package(package = "stats", type = "Depends")
+✔ Moving stats from Imports to Depends field in DESCRIPTION.
+! Are you sure you want Depends? Imports is almost always the better choice.
+stats从imports转移到了Depends部分，并且告诉我们尽量不要使用Depends，Imports是最多且更好的选择
+之所以有这样的建议，是因为当hthpkg包对stats的关系是Depends时，library(hthpkg)时会同时library(stats)，这样就增加了函数名冲突的方法，而当hthpkg包对stats的关系时Imports，library(hthpkg)的时候，不会运行library(stats)，也就不会载入stats包，从而不免了不必要的函数名冲突，仅使用我们想引用的函数
+可以看到，在DESCRIPTION文件中，出现了Depends部分，并且下面有了stats
+
+如果hthpkg包对stats包没有引用和以来的关系，仅仅在例子中使用了该包，那么我们会建议安装这个包，来实现我们的例子时，这个时候的关系时“建议”，type等于"Suggests"
+
+所以，DESCRIPTION文件中的Imprts、Depends和Suggests分别表示：引用、以来和建议
+
+
+########## 5.2 引用Bioconductor包 ##########
+单独使用Imprts、Depends和Suggests引用的都是CRAN上的包，如果想引用BIoconductor上的包，需要在前面加上biocViews::
+例如，在hthpkg包中引用limma包，需要将limma卸载Imports下面，并在Imports前面加biocViews
+usethis::use_package(package = "limma", type = "Imports")
+✔ Adding limma to Imports field in DESCRIPTION.
+☐ Refer to functions with `limma::fun()`.
+
+
+########## 5.3 引用函数 ##########
+引用包时引用函数的前提，如果想引用某个函数，必须先引用该函数所属的R包
+引用函数有两种形式，通过双冒号::直接使用、通过roxygen2注释引用
+例如，引用do包中的join_inner函数，通过双冒号引用的方式为do::join_inner()，通过注释来引用的方式为#' @importFrom do join_inner
+只能引用R包到处的函数，也就是只能引用双冒号能够访问的函数，如果不能就要用三冒号
+
+
+
+############### 6 DESCRIPTION文件撰写 ###############
+DESCRIPITON文件时R包使得说明文件，使用者通过阅读该文件，可以快速了解你的R包，DESCRIPTION主要包含了标题、说明、作者、通讯方式、版本号等几个部分
+
+【插入】
+你需要从 use_mit_license(), use_gpl3_license()等函数中选择一个​​实际运行​​，它会自动帮你修改DESCRIPTION文件。或者，你可以手动修改DESCRIPTION文件中的License字段。
+usethis::use_mit_license()
+
+########## 6.1 Title ##########
+标题一般有字数、内容和大小写的要求
+字数不宜过长，一般不要超过20个单词
+标题要能够体现包的功能
+标题的首字母西药大写，注意冠词、连词、介词的首字母需要小写
+
+
+########## 6.2 Description ##########
+描述部分时一段文字，要以句号结束
+描述部分一定要相近描写包的功能
+这部分可以分多个段落来写，另起一段的时候，要以4个空格起写
+注意不能以This package或者This function开头
+
+
+########## 6.3 Authors ##########
+需要使用person()函数来创建
+given：名
+family：姓
+middle：中间的名字
+email：邮件，并不需要每个人的email，仅给出包的拥有者即可
+role：角色，每个包可以有多个作者，但是拥有者只能有1个
+role的取值如下
+aut：作者author
+com：编译者compiler
+cph：版权拥有者copyright holder
+cre：包拥有者creator或者maintainer
+ctb：贡献者contributor
+ctr：承包者/公司bontractor
+dtc：贡献数据者data contributor
+fnd：资助人/组织funder
+rev：评论者reviewer
+ths：知道这thesis advisor
+trl：翻译者translator
+
+
+########## 6.4 version ##########
+R包必须有版本号，每次更新R包必须有不同的版本号，非正式发布的R包，版本号可以是零点几的版本，例如0.9，正式的R包建议使用一点几以上的版本，R包的版本可以是1.0、1.01、1.0.0.1
+
+
+
+############### 7 在CRAN上发布包 ###############
+将包发布在CRAN时比较难的一部，因为在成功发布前要对包进行袋狼的严格测试
+除了通过这些测试，还需要给出包的运行的详尽描述
+这些描述将存储在vignettes文件夹中，可以在主项目目录中创建该文件夹
+当确认包在本地模拟测试中运行良好并且正常记录后，选哟进入Build>Build Source Package创建源码包
+创建完源码包后，就可以在CRAnk上提交发布申请
+
+如果包在CRAnk上成功发布，之后需要确保不断更新，以修正程序错误和/或添加新功能
+如果在特定时段内未对包进行更新，CRAN就会遗弃此包
+
+
+
+############### 8 在GitHub上发布包 ###############
+一般来说，在GitHub（https://github.com）上发布包相对容易很多
+在GitHub上发布包最简单的方法时创建一个新的仓库，然后将主文件夹的内容上传至该仓库就完成了
+
+
+########## 8.1 创建GItHub账号 ##########
+我的github账号：huangtaihang@buaa.edu.cn
+密码：t.........7
+用户名：hth-buaa
+
+
+########## 8.2 创建仓库 ##########
+首先，需要在GitHub上创建也给新的代码仓库（Repository），这需要登录GitHub然后点击new/New repository按钮来创建新仓库
+进入创建新仓库界面，填写相关信息，点击Create repository即可创建成功，具体如下：
+Repository name：hthpkg
+选择Public，所有人都可以看到和下载
+剩下看个人需求
+点击Create repository
+
+
+########## 8.3 安装git ##########
+教程https://blog.csdn.net/mukes/article/details/115693833
+
+
+########## 8.4 上传包 ##########
+至此仓库创建完成，仓库页面已经告诉我们要如何上传，具体如下：
+1、首先打开命令行终端（快捷键Win+X，然后选择“终端”或“终端（管理员）”），进入R包项目的根目录（D:\pbmc-equation\mypkg\hthpkg）
+cd D:\pbmc-equation\mypkg\hthpkg
+cd /mnt/d/pbmc-equation/mypkg/scDEDS
+ls
+。通过
+git init
+把它变成git仓库（也可以新建文件夹，把它变成git仓库，之后再把项目复制到这个文件夹里面）。
+
+插入一步：配置 Git 用户信息
+# 设置全局用户信息（推荐）
+git config --global user.email "您的邮箱@example.com"
+git config --global user.name "您的姓名"
+
+git config --global user.email "huangtaihang@buaa.edu.cn"
+git config --global user.name "hth-buaa"
+
+# 或者只为当前仓库设置
+git config user.email "您的邮箱@example.com"
+git config user.name "您的姓名"
+
+git config user.email "huangtaihang@buaa.edu.cn"
+git config user.name "hth-buaa"
+
+2、通过
+git add .
+将所有文件添加到git仓库中，.代表当前目录下的所有文件。如果只想上传某个文件，只需要在git add后加文件名即可，比如git add README.md。
+3、通过
+git commit -m "first commit"
+git commit -m "2nd commit"
+把项目提交到仓库，引号中可以填写任何想要使用的提交消息。
+4、使用命令
+git branch -M main
+新建分支。
+大家可能会好奇，我们为什么要新建分支呢？
+其实在使用 git 时，创建新的分支可以帮助我们在 git 项目中实现更好的版本控制、并行开发和团队协作。它提供了更灵活的工作流程，可以提高开发效率，并帮助保持代码库的整洁和稳定。具体好处如下：
+a. 并行开发：通过创建新的分支，我们可以在独立的分支上进行开发工作，而不会影响主分支（通常是master分支）上的稳定代码。这样，我们可以同时处理多个任务、修复错误或尝试新功能，而不会破坏主分支的稳定性。
+b. 版本控制：通过创建新的分支，我们可以轻松管理不同版本的代码。例如，我们可以为每个发布版本创建一个分支，这样我们可以在每个分支上进行相关的修复和调整，同时保留每个版本的代码状态。
+c. 特性开发：创建新的分支可以帮助我们实现特性开发的流程。我们可以为每个特性或功能创建一个独立的分支，在该分支上进行开发和测试。一旦特性开发完成并经过测试，我们就可以将该分支合并到主分支中。
+d. 团队协作：分支在团队协作中发挥着重要作用。团队成员可以在各自的分支上进行工作，并在完成后将其合并到主分支中。这样，每个人都可以独立开发和测试代码，而不会相互干扰。
+是不是好处大大滴！！！
+5、在Github上剑豪仓库之后就可以和本地仓库进行关联，根据创建好的git仓库页面的提示，可以在本地仓库的命令行输入
+git remote add origin <GitHub 仓库 URL>
+git remote add origin https://github.com/hth-buaa/scDEDS.git
+git remote add origin https://github.com/hth-buaa/hthpkg.git
+可以在仓库网站页面中进行复制，<GitHub 仓库 URL>为第一步中创建的仓库的URL
+
+查看所有远程仓库​​：运行 git remote -v命令。这会列出所有配置的远程仓库及其对应的URL
+
+6、最后通过
+git push -u origin main
+git push origin main
+把本地仓库的项目推送（push）到远程仓库（也就是 Github）上
+空仓库要加-u参数，如果不是空的则不用-u
+刷新仓库网址页面，看到提交的文件
+
+
+。
+注：
+如果是本地，按照上述步骤直接来就OK啦！但如果你是在服务器上操作 git，就要确保你已经正确地配置了 git 身份验证（用户名和电子邮件地址）才可以顺利上传哟！
+像我们上面介绍的这样上传文件是有大小限制的，如果你想要上传大文件，就需要借助 Git LFS（Large File Storage, 大文件存储），这里（https://git-lfs.com/）有你想要的！
+
+完成上述步骤之后，大家就可以使用安装 GitHub 上 R 包的命令安装并使用这个包啦！如下：
+
+# 安装你的包
+## 第一种方法
+devtools::install_github("username/yourpackage")
+devtools::install_github("hth-buaa/hthpkg")
+devtools::install_github("hth-buaa/scDEDS")
+
+## 第二种方法
+remotes::install_github("username/yourpackage")
+
+## 还有很多种方法，如果大家需要的话可以告诉我，我也可以专门出一期介绍！
+
+# 加载你的包
+library(yourpackage)
+
+# 然后就可以顺利使用啦！
