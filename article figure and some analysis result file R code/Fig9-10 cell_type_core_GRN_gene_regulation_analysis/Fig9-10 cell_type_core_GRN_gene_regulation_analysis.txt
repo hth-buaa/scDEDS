@@ -1,0 +1,2134 @@
+# Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+# rm(list=ls())
+
+library(igraph)
+library(dplyr)
+library(ggraph)
+library(ggplot2)
+library(patchwork)
+library(tidyr)
+
+setwd("D:/pbmc-equation/")
+
+key_gene_analysis = list()
+cell_types = c("CD14 Mono", "CD4 Naive", "CD8 Naive","CD4 TCM")
+for (cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["summary"]] = NA
+}
+
+# Note: sGRN in the code corresponds to iGRN in the article
+
+
+
+############### 1 Build Core GRN (Calculate Hub Genes and Edges) ###############
+########## 1.1 Build Core GRN (Calculate Hub Genes and Edges) ##########
+# cell_type = "CD14 Mono"
+# cell_type = "CD4 Naive"
+# cell_type = "CD8 Naive"
+# cell_type = "CD4 TCM"
+key_information = list()
+
+for (cell_type in cell_types) {
+  ########## (1) Data Preparation ##########
+  ### Get iGRN
+  interest_cell_type_sGRN <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/3 get sGRN/interest_cell_type_sGRN.rds"))
+  sGRN = interest_cell_type_sGRN[[cell_type]]; rm(interest_cell_type_sGRN)
+  
+  ### Get pGRN
+  interest_cell_type_branch_model_train <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_model_train.rds"))
+  pred_result = interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]][["pred_result"]]; rm(interest_cell_type_branch_model_train)
+  pGRN = sGRN
+  pGRN[, ] = 0
+  for (TG in rownames(pGRN)) {
+    for (TF in colnames(pGRN)) {
+      theta = paste0("TG_", TG, "←", TF, "_TF")
+      if (theta %in% rownames(pred_result)) {
+        pGRN[TG, TF] = pred_result[theta, "theta_p"]
+      }
+    }
+  }; rm(TG, TF, theta, pred_result)
+  
+  
+  
+  ########## (2) Find Key Nodes and Edges ##########
+  key_info = list()
+  key_info[["sGRN"]] = list()
+  key_info[["pGRN"]] = list()
+  
+  for (GRN_type in c("sGRN", "pGRN")) {
+    # GRN_type = "sGRN"
+    if (GRN_type == "sGRN") {key_info[[GRN_type]][["network"]] = sGRN} else {key_info[[GRN_type]][["network"]] = pGRN}
+    
+    
+    ##### (2.1) Data Preprocessing #####
+    if (GRN_type == "sGRN") {X = sGRN} else {X = pGRN} # Adjacency matrix is data.frame X, rows=TG, columns=TFG
+    adj_matrix <- t(X) # Convert adjacency matrix to igraph directed weighted graph
+    # ?graph_from_biadjacency_matrix
+    g <- graph_from_biadjacency_matrix(adj_matrix, directed = TRUE, weighted = TRUE)
+    
+    
+    ##### (2.2) Key Node Metric Calculation ##### 
+    # (1) Weighted Out-Degree Centrality (TFG only)
+    tfg_nodes <- V(g)[V(g)$type == FALSE]
+    # ?strength # Degree, also known as weighted vertex degree, describes the sum of weights of all adjacent edges of a vertex in a weighted graph
+    out_degree <- strength(g, vids = tfg_nodes, mode = "out", weights = E(g)$weight)
+    
+    # (2) Weighted In-Degree Centrality (TG only) 
+    tg_nodes <- V(g)[V(g)$type == TRUE]
+    in_degree <- strength(g, vids = tg_nodes, mode = "in", weights = E(g)$weight)
+    
+    # (3) Improved PageRank (Full Network Weighted)
+    # ?page_rank # A node's importance depends not only on itself, but more on the importance of other nodes linking to it
+    pagerank <- page_rank(g, directed = TRUE, weights = NULL, damping = 0.85)$vector # weights or E(g)$weight
+    
+    # (4) Betweenness Centrality (Full Network)
+    # ?igraph::betweenness # Betweenness Centrality reflects the "bridge" or "intermediary" role of nodes or edges in the entire network information flow
+    betweenness <- igraph::betweenness(g, directed = TRUE, weights = 1/E(g)$weight) # Convert weights to distances
+    
+    # (5) Closeness Centrality (Full Network Weighted)
+    # Note: Need to convert regulatory strength weights to distances (take reciprocal)
+    closeness <- igraph::closeness(
+      g, 
+      mode = "all",             # Calculate closeness centrality ignoring direction
+      weights = 1/E(g)$weight,  # Convert weights to distances
+      normalized = TRUE         # Normalize results
+    )
+    closeness[is.na(closeness)] <- 0
+    
+    # (6) Eigenvector Centrality (Full Network Weighted)
+    eigen <- eigen_centrality(
+      g,
+      directed = FALSE,       # Calculate eigenvector centrality ignoring direction
+      weights = E(g)$weight,  # Use original weights directly
+      scale = TRUE            # Normalize results
+    )$vector
+    
+    # Integrate TFG and TG results
+    for (gene_type in c("tfg", "tg")) {
+      # gene_type = "tfg"
+      if (gene_type == "tfg") {nodes = tfg_nodes} else {nodes = tg_nodes}
+      if (gene_type == "tfg") {degree = out_degree} else {degree = in_degree}
+      node_metrics <- data.frame(
+        node = names(nodes),
+        degree = degree,
+        pagerank = pagerank[names(nodes)],
+        betweenness = betweenness[names(nodes)],
+        closeness = closeness[names(nodes)],
+        eigen = eigen[names(nodes)]
+      ) %>% dplyr::filter(degree != 0) %>% mutate(across(-node, scales::rescale))
+      
+      # Perform z-score normalization for each metric, calculate mean of three normalized results to get comprehensive centrality of TFG nodes
+      node_metrics[, 7:11] <- scale(node_metrics[, 2:6])
+      colnames(node_metrics)[7:11] = c(
+        "degree with z-score",
+        "pagerank with z-score",
+        "betweenness with z-score",
+        "closeness with z-score",
+        "eigen with z-score"
+      )
+      node_metrics[, "comprehensive centrality"] <- rowMeans(node_metrics[, 7:11], na.rm = TRUE)
+      
+      # Centrality is bimodal or multimodal distribution, calculate the smallest inflection point greater than the 85th percentile of comprehensive centrality, nodes with centrality greater than this are considered core nodes
+      threshold_node_key = list()
+      for (centrality in colnames(node_metrics)[7:12]) {
+        kde_result <- density(node_metrics[, centrality], adjust = 1) # Extract data and perform kernel density estimation
+        dy_dx <- diff(kde_result$y) / diff(kde_result$x) # Calculate first derivative (slope change)
+        d2y_dx2 <- diff(dy_dx) / diff(kde_result$x[-1]) # Calculate second derivative (convexity change)
+        sign_changes <- which(diff(sign(d2y_dx2)) != 0) # Find inflection points (positions where second derivative sign changes)
+        threshold_node_key[[centrality]] <- kde_result$x[sign_changes + 1] # Get x-coordinates of inflection points
+        threshold_node_key[[centrality]] = min(threshold_node_key[[centrality]][
+          threshold_node_key[[centrality]] > quantile(node_metrics[, centrality], probs = 0.85, na.rm = TRUE)
+        ])
+      }
+      threshold_node_key = unlist(threshold_node_key)
+      
+      # Plot kernel density curve of node centrality for the entire network
+      node_metrics_long <- pivot_longer(  # Convert data from "wide format" to "long format" for plotting multiple groups with ggplot2 at once
+        data = node_metrics,
+        cols = tail(colnames(node_metrics), 6), # Automatically select last 6 columns
+        names_to = "Centrality",   # New column: store metric names
+        values_to = "Value"    # New column: store corresponding values
+      )
+      node_metrics_long$Centrality <- factor(
+        node_metrics_long$Centrality,
+        levels = c("degree with z-score", 
+                   "pagerank with z-score", 
+                   "betweenness with z-score", 
+                   "closeness with z-score",
+                   "eigen with z-score",
+                   "comprehensive centrality")
+      )
+      vline_data <- data.frame(
+        threshold_node_key = names(threshold_node_key),
+        xint = unlist(threshold_node_key)
+      )
+      if (gene_type == "tfg") {
+        title = paste0(cell_type, " ", GRN_type, " Kernel density estimation of TF node centrality")
+      } else {
+        title = paste0(cell_type, " ", GRN_type, " Kernel density estimation of TG node centrality")
+      }
+      p = ggplot(node_metrics_long, aes(x = Value, linetype = Centrality)) +
+        geom_density(alpha = 0.4, aes(fill = Centrality, color = Centrality)) +
+        scale_linetype_manual(values = c(
+          "degree with z-score" = "dashed",
+          "pagerank with z-score" = "dotted", 
+          "betweenness with z-score" = "dotdash",
+          "closeness with z-score" = "longdash",
+          "eigen with z-score" = "twodash",
+          "comprehensive centrality" = "solid"
+        )) +
+        geom_vline(
+          data = vline_data, 
+          aes(xintercept = xint, color = threshold_node_key), 
+          # linetype = "dashed", 
+          linetype = c(
+            "degree with z-score" = "dashed",
+            "pagerank with z-score" = "dotted", 
+            "betweenness with z-score" = "dotdash",
+            "closeness with z-score" = "longdash",
+            "eigen with z-score" = "twodash",
+            "comprehensive centrality" = "solid"
+          ),
+          # linewidth = 1,
+          show.legend = FALSE
+        ) + 
+        theme_minimal() +
+        labs(title = title, 
+             x = "", y = "Density")
+      print(p)
+      ggsave(paste0("./Results/3 network new/", title, ".png"),
+             plot = p, limitsize = FALSE,
+             width = 6, height = 4, dpi = 600)
+      
+      key_info[[GRN_type]][[paste0("threshold_", gene_type, "_node_key")]] = threshold_node_key
+      key_info[[GRN_type]][[paste0(gene_type, "_node_metrics")]] = node_metrics
+    }; rm(gene_type)
+    
+    
+    ##### (2.3) Key Edge Metric Calculation #####
+    # (1) Edge weight
+    edge_weight = as.data.frame(as_edgelist(g, names = TRUE))
+    colnames(edge_weight) = c("from", "to")
+    edge_weight$edge_weight = E(g)$weight
+    edge_weight = edge_weight[edge_weight$from %in% colnames(X), ]
+    edge_weight = edge_weight[edge_weight$to %in% rownames(X), ]
+    rownames(edge_weight) = paste0(edge_weight$from, "→", edge_weight$to)
+    
+    # (2) Edge betweenness centrality
+    # ?igraph::edge_betweenness # Edge Betweenness Centrality reflects the "bridge" role of edges in the entire network information flow
+    edge_betweenness = as.data.frame(as_edgelist(g, names = TRUE))
+    colnames(edge_betweenness) = c("from", "to")
+    edge_betweenness$edge_betweenness <- igraph::edge_betweenness(g, directed = TRUE, weights = 1/E(g)$weight) # Convert weights to distances
+    edge_betweenness = edge_betweenness[edge_betweenness$from %in% colnames(X), ]
+    edge_betweenness = edge_betweenness[edge_betweenness$to %in% rownames(X), ]
+    rownames(edge_betweenness) = paste0(edge_betweenness$from, "→", edge_betweenness$to)
+    
+    # Merge edge metrics
+    edge_metrics = edge_weight
+    edge_metrics$edge_betweenness = 0
+    for (edge in rownames(edge_metrics)) {
+      edge_metrics[edge, "edge_betweenness"] = edge_betweenness[edge, "edge_betweenness"]
+    }
+    edge_metrics <- edge_metrics %>% mutate(across(-c(from, to), ~ scales::rescale(.x)))
+    
+    # Perform z-score normalization for each metric, calculate mean of three normalized results to get comprehensive centrality of TG nodes
+    edge_metrics[, 5:6] <- scale(edge_metrics[, 3:4])
+    colnames(edge_metrics)[5:6] = c("weight with z-score","betweenness with z-score")
+    edge_metrics[, "comprehensive centrality"] <- rowMeans(edge_metrics[, 5:6], na.rm = TRUE)
+    
+    # Centrality is bimodal or multimodal distribution, calculate the smallest inflection point greater than the 85th percentile of comprehensive centrality, nodes with centrality greater than this are considered core nodes
+    threshold_edge_key = list()
+    for (centrality in colnames(edge_metrics)[5:7]) {
+      kde_result <- density(edge_metrics[, centrality], adjust = 1) # Extract data and perform kernel density estimation
+      dy_dx <- diff(kde_result$y) / diff(kde_result$x) # Calculate first derivative (slope change)
+      d2y_dx2 <- diff(dy_dx) / diff(kde_result$x[-1]) # Calculate second derivative (convexity change)
+      sign_changes <- which(diff(sign(d2y_dx2)) != 0) # Find inflection points (positions where second derivative sign changes)
+      threshold_edge_key[[centrality]] <- kde_result$x[sign_changes + 1] # Get x-coordinates of inflection points
+      threshold_edge_key[[centrality]] = min(threshold_edge_key[[centrality]][
+        threshold_edge_key[[centrality]] > quantile(edge_metrics[, centrality], probs = 0.85, na.rm = TRUE)
+      ])
+    }
+    threshold_edge_key = unlist(threshold_edge_key)
+    
+    # Plot kernel density curve of node centrality for the entire network
+    edge_metrics_long <- pivot_longer(  # Convert data from "wide format" to "long format" for plotting multiple groups with ggplot2 at once
+      data = edge_metrics,
+      cols = tail(colnames(edge_metrics), 3), # Automatically select last three columns
+      names_to = "Centrality",   # New column: store metric names
+      values_to = "Value"    # New column: store corresponding values
+    )
+    edge_metrics_long$Centrality <- factor(
+      edge_metrics_long$Centrality,
+      levels = c("weight with z-score", 
+                 "betweenness with z-score", 
+                 "comprehensive centrality")
+    )
+    vline_data <- data.frame(
+      threshold_edge_key = names(threshold_edge_key),
+      xint = unlist(threshold_edge_key)
+    )
+    p = ggplot(edge_metrics_long, aes(x = Value, linetype = Centrality)) +
+      geom_density(alpha = 0.4, aes(fill = Centrality, color = Centrality)) +
+      scale_linetype_manual(values = c(
+        "weight with z-score" = "dashed",
+        "betweenness with z-score" = "dotted",
+        "comprehensive centrality" = "solid"
+      )) +
+      geom_vline(
+        data = vline_data, 
+        aes(xintercept = xint, color = threshold_edge_key), 
+        # linetype = "dashed", 
+        linetype = c(
+          "weight with z-score" = "dashed",
+          "betweenness with z-score" = "dotted",
+          "comprehensive centrality" = "solid"
+        ),
+        # linewidth = 1,
+        show.legend = FALSE
+      ) + 
+      theme_minimal() +
+      labs(title = paste0(cell_type, " ", GRN_type, " Kernel density estimation of edge centrality"), 
+           x = "", y = "Density")
+    print(p)
+    ggsave(paste0("./Results/3 network new/", cell_type, " ", GRN_type, " Kernel density estimation of edge centrality.png"),
+           plot = p, limitsize = FALSE,
+           width = 6, height = 5, dpi = 600)
+    
+    key_info[[GRN_type]][["threshold_edge_key"]] = threshold_edge_key
+    key_info[[GRN_type]][["edge_metrics"]] = edge_metrics
+  }
+  # rm(list = setdiff(ls(), c("key_info", "cell_type")))
+  
+  
+  ##### (2.4) Core Gene Screening #####
+  for (gene_type in c("tfg", "tg")) {
+    # gene_type = "tfg"
+    if (gene_type == "tfg") {
+      genes = colnames(key_info[["sGRN"]][["network"]])
+    } else {
+      genes = rownames(key_info[["sGRN"]][["network"]])
+    }
+    centralities = c(
+      paste0(colnames(key_info[["sGRN"]][[paste0(gene_type, "_node_metrics")]])[7:12], " in sGRN node"),
+      paste0(colnames(key_info[["pGRN"]][[paste0(gene_type, "_node_metrics")]])[7:12], " in pGRN node"),
+      paste0(colnames(key_info[["sGRN"]][["edge_metrics"]])[5:7], " in sGRN edge"),
+      paste0(colnames(key_info[["pGRN"]][["edge_metrics"]])[5:7], " in pGRN edge")
+    )
+    gene_key_level = as.data.frame(
+      matrix(0, nrow = length(genes), ncol = length(centralities), 
+             dimnames = list(genes, centralities))
+    )
+    
+    for (gene in rownames(gene_key_level)) {
+      # gene = rownames(gene_key_level)[50]
+      for (centrality_in_GRN in colnames(gene_key_level)) {
+        # centrality_in_GRN = colnames(gene_key_level)[10]
+        GRN_type = sub(".*in ", "", centrality_in_GRN)
+        part <- scan(text = GRN_type, what = "", quiet = TRUE)[2]
+        GRN_type <- scan(text = GRN_type, what = "", quiet = TRUE)[1]
+        centrality = sub(" in.*", "", centrality_in_GRN)
+        if (part == "node") {
+          if (
+            gene %in% rownames(key_info[[GRN_type]][[paste0(gene_type, "_node_metrics")]]) & 
+            (key_info[[GRN_type]][[paste0(gene_type, "_node_metrics")]][gene, centrality] > 
+             key_info[[GRN_type]][[paste0("threshold_", gene_type, "_node_key")]][[centrality]])
+          ) {gene_key_level[gene, centrality_in_GRN] = 1}
+        } else {
+          if (gene_type == "tfg") {direction = "from"} else {direction = "to"}
+          if (gene %in% key_info[[GRN_type]][["edge_metrics"]][, direction]) {
+            edge_metrics <- key_info[[GRN_type]][["edge_metrics"]]
+            regulon <- edge_metrics[edge_metrics[, direction] == gene, ]
+            if (any(as.numeric(regulon[, centrality]) > 
+                    key_info[[GRN_type]][[paste0("threshold_edge_key")]][[centrality]])) {
+              gene_key_level[gene, centrality_in_GRN] = gene_key_level[gene, centrality_in_GRN] + 1
+            }
+          }
+        }
+      }
+    }; rm(gene, centrality_in_GRN, GRN_type, part, centrality, edge_metrics, regulon)
+    
+    # Set row sum weight
+    weight_in_node = c(
+      0.70, 0.70, 0.70, 0.70, 0.70, 3.50^0.5, # iGRN weight is 0.7 times pGRN
+      1.00, 1.00, 1.00, 1.00, 1.00, 5.00^0.5,
+      0.56, 0.56, 1.12^0.5,
+      0.80, 0.80, 1.60^0.5 # Edge weight is 0.8 times node weight
+    )
+    names(weight_in_node) = colnames(gene_key_level)
+    
+    gene_key_level$importance_score = 0
+    for (gene in rownames(gene_key_level)) {
+      for (centrality in centralities) {
+        if(grepl("node", centrality)) {
+          gene_key_level[gene, "importance_score"] = gene_key_level[gene, "importance_score"] + 
+            gene_key_level[gene, centrality] * weight_in_node[centrality]
+        } else {
+          gene_key_level[gene, "importance_score"] = gene_key_level[gene, "importance_score"] + 
+            gene_key_level[gene, centrality]^0.5 * weight_in_node[centrality]
+        }
+      }
+    }
+    
+    gene_key_level <- gene_key_level %>%
+      filter(.[[ncol(.)]] > 0) %>%     # Keep rows where last column value > 0
+      arrange(desc(.[[ncol(.)]])) %>%  # Sort descending by last column
+      select(last_col(), everything()) # Make last column the first column
+    
+    key_info[[paste0("key_", gene_type, "s")]] = gene_key_level
+    key_info[["weight_in_node"]] = NULL
+    key_info[["weight_in_node"]] = weight_in_node
+  }
+  # rm(list = setdiff(ls(), c("key_info", "cell_type")))
+  
+  
+  ##### (2.5) Core Edge Screening #####
+  regulons = unique(rownames(key_info[["sGRN"]][["edge_metrics"]]), colnames(key_info[["sGRN"]][["edge_metrics"]]))
+  centralities = c(
+    paste0(colnames(key_info[["sGRN"]][["edge_metrics"]])[5:7], " in sGRN"),
+    paste0(colnames(key_info[["pGRN"]][["edge_metrics"]])[5:7], " in pGRN"),
+    "tfg_importance_score", "tg_importance_score"
+  )
+  edge_key_level = as.data.frame(
+    matrix(0, nrow = length(regulons), ncol = length(centralities), 
+           dimnames = list(regulons, centralities))
+  )
+  
+  for (regulon in rownames(edge_key_level)) {
+    # regulon = rownames(edge_key_level)[1]
+    for (centrality_in_GRN in colnames(edge_key_level)[1:6]) {
+      # centrality_in_GRN = colnames(edge_key_level)[1]
+      GRN_type = sub(".*in ", "", centrality_in_GRN)
+      centrality = sub(" in.*", "", centrality_in_GRN)
+      if (
+        regulon %in% rownames(key_info[[GRN_type]][["edge_metrics"]]) & 
+        (key_info[[GRN_type]][["edge_metrics"]][regulon, centrality] > 
+         key_info[[GRN_type]][["threshold_edge_key"]][[centrality]])
+      ) {edge_key_level[regulon, centrality_in_GRN] = 1}
+    }
+    
+    tfg <- strsplit(regulon, "→", fixed = TRUE)[[1]][1]
+    if (tfg %in% rownames(key_info[["key_tfgs"]])) {
+      edge_key_level[regulon, "tfg_importance_score"] = key_info[["key_tfgs"]][tfg, "importance_score"]
+    }
+    tg <- strsplit(regulon, "→", fixed = TRUE)[[1]][2]
+    if (tg %in% rownames(key_info[["key_tgs"]])) {
+      edge_key_level[regulon, "tg_importance_score"] = key_info[["key_tgs"]][tg, "importance_score"]
+    }
+  }; rm(regulon, centrality_in_GRN, GRN_type, centrality, tfg, tg)
+  
+  # Set row sum weight
+  weight_in_edge = c(
+    0.70, 0.70, 1.4^0.5, # iGRN weight is 0.7 times pGRN
+    1.00, 1.00, 2.00^0.5,
+    rep(0.8/sum(key_info[["weight_in_node"]])*sum(c(0.70, 0.70, 1.4^0.5, 1.00, 1.00, 2.00^0.5)),2) # Node weight = 0.8/node weight sum * edge weight sum
+  )
+  names(weight_in_edge) = colnames(edge_key_level)
+  
+  edge_key_level$importance_score = 0
+  for (regulon in rownames(edge_key_level)) {
+    # regulon = rownames(edge_key_level)[1]
+    if (sum(edge_key_level[regulon, centralities[1:6]]) > 0) {
+      for (centrality in centralities) {
+        edge_key_level[regulon, "importance_score"] = edge_key_level[regulon, "importance_score"] + 
+          edge_key_level[regulon, centrality] * weight_in_edge[centrality]
+      }
+    }
+  }
+  
+  edge_key_level <- edge_key_level %>%
+    filter(.[[ncol(.)]] > 0) %>%     # Keep rows where last column value > 0
+    arrange(desc(.[[ncol(.)]])) %>%  # Sort descending by last column
+    select(last_col(), everything()) # Make last column the first column
+  edge_key_level <- edge_key_level %>%
+    filter(rowSums(across(2:7)) != 0)
+  
+  key_info[["key_edges"]] = edge_key_level
+  key_info[["weight_in_edge"]] = weight_in_edge
+  # rm(list = setdiff(ls(), c("key_info", "cell_type")))
+  # base::saveRDS(key_info, file = paste0("./Results/3 network new/", gsub(" ", "_", cell_type), "_key_info.rds"))
+  
+  key_information[[cell_type]] = key_info
+  key_gene_analysis[[cell_type]][["centrality"]] = key_info
+}
+base::saveRDS(key_information, file = paste0("./Results/3 network new/key_information.rds"))
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c("cell_types", "key_gene_analysis", "key_information")))
+
+
+########## 1.2 Record Results ##########
+for (cell_type in names(key_information)) {
+  # cell_type = names(key_information)[1]
+  key_gene_analysis[[cell_type]][["summary"]] <- data.frame(
+    gene = c(
+      rownames(key_information[[cell_type]][["key_tfgs"]]),
+      rownames(key_information[[cell_type]][["key_tgs"]])
+    ),
+    gene_type = c(
+      rep("TF", nrow(key_information[[cell_type]][["key_tfgs"]])), 
+      rep("TG", nrow(key_information[[cell_type]][["key_tgs"]]))
+    ), 
+    importance_score = c(key_information[[cell_type]][["key_tfgs"]]$importance_score, 
+                         key_information[[cell_type]][["key_tgs"]]$importance_score),
+    
+    high_node_degree_as_sGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["degree with z-score in sGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["degree with z-score in sGRN node"]]
+    ),
+    high_node_pagerank_as_sGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["pagerank with z-score in sGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["pagerank with z-score in sGRN node"]]
+    ),
+    high_node_betweenness_as_sGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["betweenness with z-score in sGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["betweenness with z-score in sGRN node"]]
+    ),
+    high_node_closeness_as_sGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["closeness with z-score in sGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["closeness with z-score in sGRN node"]]
+    ),
+    high_node_eigen_as_sGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["eigen with z-score in sGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["eigen with z-score in sGRN node"]]
+    ),
+    high_node_comprehensiveness_in_sGRN = c(
+      key_information[[cell_type]][["key_tfgs"]][["comprehensive centrality in sGRN node"]],
+      key_information[[cell_type]][["key_tgs"]][["comprehensive centrality in sGRN node"]]
+    ),
+    
+    high_node_degree_as_pGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["degree with z-score in pGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["degree with z-score in pGRN node"]]
+    ),
+    high_node_pagerank_as_pGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["pagerank with z-score in pGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["pagerank with z-score in pGRN node"]]
+    ),
+    high_node_betweenness_as_pGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["betweenness with z-score in pGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["betweenness with z-score in pGRN node"]]
+    ),
+    high_node_closeness_as_pGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["closeness with z-score in pGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["closeness with z-score in pGRN node"]]
+    ),
+    high_node_eigen_as_pGRN_node = c(
+      key_information[[cell_type]][["key_tfgs"]][["eigen with z-score in pGRN node"]], 
+      key_information[[cell_type]][["key_tgs"]][["eigen with z-score in pGRN node"]]
+    ),
+    high_node_comprehensiveness_in_pGRN = c(
+      key_information[[cell_type]][["key_tfgs"]][["comprehensive centrality in pGRN node"]],
+      key_information[[cell_type]][["key_tgs"]][["comprehensive centrality in pGRN node"]]
+    ),
+    
+    high_edge_weight_in_sGRN =  c(
+      key_information[[cell_type]][["key_tfgs"]][["weight with z-score in sGRN edge"]],
+      key_information[[cell_type]][["key_tgs"]][["weight with z-score in sGRN edge"]]
+    ),
+    high_edge_betweenness_in_sGRN =  c(
+      key_information[[cell_type]][["key_tfgs"]][["betweenness with z-score in sGRN edge"]],
+      key_information[[cell_type]][["key_tgs"]][["betweenness with z-score in sGRN edge"]]
+    ),
+    high_edge_comprehensiveness_in_sGRN =  c(
+      key_information[[cell_type]][["key_tfgs"]][["comprehensive centrality in sGRN edge"]],
+      key_information[[cell_type]][["key_tgs"]][["comprehensive centrality in sGRN edge"]]
+    ),
+    
+    high_edge_weight_in_pGRN =  c(
+      key_information[[cell_type]][["key_tfgs"]][["weight with z-score in pGRN edge"]],
+      key_information[[cell_type]][["key_tgs"]][["weight with z-score in pGRN edge"]]
+    ),
+    high_edge_betweenness_in_pGRN =  c(
+      key_information[[cell_type]][["key_tfgs"]][["betweenness with z-score in pGRN edge"]],
+      key_information[[cell_type]][["key_tgs"]][["betweenness with z-score in pGRN edge"]]
+    ),
+    high_edge_comprehensiveness_in_pGRN =  c(
+      key_information[[cell_type]][["key_tfgs"]][["comprehensive centrality in pGRN edge"]],
+      key_information[[cell_type]][["key_tgs"]][["comprehensive centrality in pGRN edge"]]
+    ),
+    
+    row.names = c(
+      paste0("TF_", rownames(key_information[[cell_type]][["key_tfgs"]])), 
+      paste0("TG_", rownames(key_information[[cell_type]][["key_tgs"]]))
+    )
+  )
+}
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+
+
+############### 2 Cell Interaction Analysis ###############
+library(data.table)
+library(dplyr)
+library(Seurat)
+library(tidyverse)
+library(patchwork)
+library(CellChat)
+library(ggalluvial)
+library(ggsci)
+
+setwd("D:/pbmc-equation/")
+# setwd("/mnt/d/pbmc-equation/")
+
+
+########## 2.1 Data Loading and Preprocessing ##########
+scRNAseq <- readRDS("./scRNAseq.rds")
+# key_information <- readRDS("./Results/3 network new/key_information.rds")
+
+genes_hub = unique(c(
+  rownames(key_information[["CD14 Mono"]][["key_tfgs"]]), rownames(key_information[["CD14 Mono"]][["key_tgs"]]),
+  rownames(key_information[["CD4 Naive"]][["key_tfgs"]]), rownames(key_information[["CD4 Naive"]][["key_tgs"]]),
+  rownames(key_information[["CD8 Naive"]][["key_tfgs"]]), rownames(key_information[["CD8 Naive"]][["key_tgs"]]),
+  rownames(key_information[["CD4 TCM"]][["key_tfgs"]]), rownames(key_information[["CD4 TCM"]][["key_tgs"]])
+))
+genes = rownames(scRNAseq)
+
+# cell_types = c("CD14 Mono", "CD4 Naive", "CD8 Naive", "CD4 TCM")
+cell_types_all = unique(scRNAseq@meta.data[["seurat_annotations"]])
+cell_types_all = cell_types_all[cell_types_all != "filtered"]
+
+scRNAseq <- subset(scRNAseq, features = genes, subset = seurat_annotations %in% cell_types_all)
+
+
+########## 2.2 Create CellChat Object ##########
+### Extract expression matrix and cell classification information
+data.input <- GetAssayData(scRNAseq, layer = "data")
+identity <- subset(scRNAseq@meta.data, select = "seurat_annotations")
+
+### Create CellChat object
+cellchat <- createCellChat(object = data.input, meta = identity,  group.by = "seurat_annotations")
+rm(data.input, identity)
+
+
+########## 2.3 Select Database ##########
+### Select database, options: CellChatDB.human, CellChatDB.mouse
+CellChatDB <- CellChatDB.human
+# showDatabaseCategory(CellChatDB)
+
+### Use all interaction databases for analysis
+unique(CellChatDB$interaction$annotation)
+CellChatDB.use <- subsetDB(CellChatDB, search = c("Secreted Signaling", "ECM-Receptor", "Cell-Cell Contact"))
+cellchat@DB <- CellChatDB.use
+
+### Subset the expression data of signaling genes to save computational costs
+cellchat <- subsetData(cellchat)
+
+
+########## 2.4 Run CellChat ##########
+### Identify overexpressed genes in each cell type
+t1 = Sys.time(); cellchat <- identifyOverExpressedGenes(cellchat); print(Sys.time() - t1) # 1.075475 mins
+
+### Identify commonly overexpressed ligand-receptor pairs between two cell types
+t1 = Sys.time(); cellchat <- identifyOverExpressedInteractions(cellchat); print(Sys.time() - t1) # 0.3064172 secs
+
+### Project ligands and receptors onto PPI network (using protein-protein interaction network (PPI) to correct technical noise in single-cell data, especially useful for handling data with insufficient sequencing depth)
+t1 = Sys.time(); cellchat <- projectData(cellchat, PPI.human); print(Sys.time() - t1) # 5.311987 mins
+
+### Calculate communication probability, infer cell interaction communication network
+t1 = Sys.time(); cellchat <- computeCommunProb(cellchat, population.size = TRUE, distance.use = FALSE); print(Sys.time() - t1) # 8.278516 mins
+
+### Filter out cell-cell communications if only a few cells are present in specific cell populations
+t1 = Sys.time(); cellchat <- filterCommunication(cellchat, min.cells = 3); print(Sys.time() - t1) # 0.002300978 secs
+
+### Extract inferred cell interaction communication network data frame
+# result_pathway <- subsetCommunication(cellchat,slot.name = "netP") # Extract inferred communication at signaling pathway level
+result_LR <- subsetCommunication(cellchat, slot.name = "net") # Extract inferred communication at ligand/receptor level
+# source：signal sending cell population
+# target：signal receiving cell population
+# interaction_name：ligand-receptor pair name
+# pathway_name：belonging signaling pathway
+# prob：communication probability value
+# pval：significance p-value
+# ligand：ligand gene
+# receptor：receptor gene
+
+### Select results related to core genes
+# result_pathway_filtered <- subset(result_pathway, source %in% cell_types | target %in% cell_types)
+
+result_LR_filtered <- subset(result_LR, source %in% cell_types | target %in% cell_types)
+result_LR_filtered[, "keep"] = FALSE
+for (row in 1:nrow(result_LR_filtered)) {
+  gene_in_row = as.character(result_LR_filtered[row, c("ligand", "receptor")])
+  gene_in_row <- unlist(lapply(gene_in_row, function(x) {
+    if (str_detect(x, "_")) { # Check if contains underscore
+      c(x, str_split_fixed(x, "_", 2)) # Split and combine
+    } else {x} # Keep original string if no underscore
+  }))
+  if (any(gene_in_row %in% genes_hub)) {result_LR_filtered[row, "keep"] = TRUE}
+}
+result_LR_filtered <- subset(result_LR_filtered, keep)
+result_LR_filtered$keep = NULL
+
+base::saveRDS(result_LR_filtered, file = "./Results/3 network new/result_LR_filtered.rds")
+# rm(list = setdiff(ls(), c("cell_types", "cell_types_all", "key_gene_analysis", "key_information", "result_LR_filtered")))
+
+
+########## 2.5 Record Results ##########
+for (cell_type in names(key_gene_analysis)) {
+  # cell_type = names(key_gene_analysis)[1]
+  
+  ### Filter interaction results for this cell type
+  result_LR_filtered1 = result_LR_filtered
+  result_LR_filtered1 <- subset(result_LR_filtered1, source %in% cell_type | target %in% cell_type)
+  result_LR_filtered1[, "keep"] = FALSE
+  for (row in 1:nrow(result_LR_filtered1)) {
+    gene_in_row = as.character(result_LR_filtered1[row, c("ligand", "receptor")])
+    gene_in_row <- unlist(lapply(gene_in_row, function(x) {
+      if (str_detect(x, "_")) { # Check if contains underscore
+        c(x, str_split_fixed(x, "_", 2)) # Split and combine
+      } else {x} # Keep original string if no underscore
+    }))
+    if (any(gene_in_row %in% key_gene_analysis[[cell_type]][["summary"]][["gene"]])) {
+      result_LR_filtered1[row, "keep"] = TRUE
+    }
+  }
+  result_LR_filtered1 <- subset(result_LR_filtered1, keep)
+  result_LR_filtered1$keep = NULL
+  
+  key_gene_analysis[[cell_type]][["cell_communication"]] = result_LR_filtered1
+  
+  ### Get ligands and receptors
+  ligands = names(table(result_LR_filtered1$ligand))
+  ligands = ligands[ligands %in% key_gene_analysis[[cell_type]][["summary"]][["gene"]]]
+  receptors = names(table(result_LR_filtered1$receptor)) 
+  receptors <- unique(unlist(strsplit(receptors, "_")))
+  receptors = receptors[receptors %in% key_gene_analysis[[cell_type]][["summary"]][["gene"]]]
+  
+  ### Record LR properties of core genes
+  key_gene_analysis[[cell_type]][["summary"]][["is_ligand"]] = 0
+  key_gene_analysis[[cell_type]][["summary"]][["is_receptor"]] = 0
+  for (type_gene in rownames(key_gene_analysis[[cell_type]][["summary"]])) {
+    # type_gene = rownames(key_gene_analysis[[cell_type]][["summary"]])[1]
+    gene <- strsplit(type_gene, "_")[[1]][2]
+    if (gene %in% ligands) {
+      key_gene_analysis[[cell_type]][["summary"]][type_gene, "is_ligand"] = 1
+    }
+    if (gene %in% receptors) {
+      key_gene_analysis[[cell_type]][["summary"]][type_gene, "is_receptor"] = 1
+    }
+  }
+}
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+rm(list = setdiff(ls(), c("cell_types", "cell_types_all", "key_gene_analysis", "key_information", "result_LR_filtered")))
+# key_information <- readRDS("./Results/3 network new/key_information.rds")
+# key_gene_analysis <- readRDS("./Results/3 network new/key_gene_analysis.rds")
+# result_LR_filtered = readRDS("./Results/3 network new/result_LR_filtered.rds")
+
+
+
+############### 3 Find markers and annotate cell states generated by pseudotime analysis ###############
+# Result: Only CD14 Mono subgroup annotated successfully, all other subgroups failed to annotate
+
+library(Seurat)
+library(dplyr)
+library(SeuratObject)
+library(writexl)
+library(data.table)
+
+# setwd("/mnt/d/pbmc-equation/")
+setwd("D:/pbmc-equation/")
+
+
+########## 3.1 Get marker genes for each cell state in each branch ##########
+topgene = list()
+n_top = 100000
+
+# cell_type = "CD14 Mono"
+# cell_type = "CD4 Naive"
+# cell_type = "CD8 Naive"
+# cell_type = "CD4 TCM"
+for (cell_type in cell_types) {
+  interest_cell_type_Branches <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/2.1 Data Processing - Pseudotime Analysis And Cell Branching Assignment/interest_cell_type_Branches.rds"))
+  scRNAseq <- readRDS("./scRNAseq.rds")
+  scRNAseq <- subset(scRNAseq, subset = seurat_annotations == cell_type)
+  
+  for (n in 1:length(interest_cell_type_Branches[[cell_type]])) {
+    scRNAseq@meta.data[[paste0("Branch", n)]] = "-"
+  }
+  
+  for (n in 1:length(interest_cell_type_Branches[[cell_type]])) {
+    for (cell in rownames(interest_cell_type_Branches[[cell_type]][[n]])) {
+      scRNAseq@meta.data[cell, paste0("Branch", n)] = interest_cell_type_Branches[[cell_type]][[n]][cell, "State"]
+    }
+  }
+  
+  scRNAseq@meta.data[["State"]] = "-"
+  for (cell in rownames(scRNAseq@meta.data)) {
+    a = unique(as.character(scRNAseq@meta.data[cell, paste0("Branch", 1:length(interest_cell_type_Branches[[cell_type]]))]))
+    a <- a[!a %in% c("-") & !is.na(a)]
+    scRNAseq@meta.data[cell, "State"] = a
+  }; rm(a)
+  
+  diff.wilcox = FindAllMarkers(scRNAseq, group.by = "State")
+  all.markers = diff.wilcox %>% dplyr::select(gene, everything()) %>% subset(p_val<0.05) %>% subset(p_val_adj<0.05) %>% subset(avg_log2FC>0)
+  all.markers$cluster <- factor(all.markers$cluster, levels = sort(unique(as.numeric(levels(all.markers$cluster)))))
+  topgene[[cell_type]] = all.markers %>% group_by(cluster) %>% top_n(n = n_top, wt = avg_log2FC) %>% arrange(cluster, desc(avg_log2FC))
+}; rm(diff.wilcox, all.markers)
+
+for (cell_type in names(topgene)) {
+  file_name <- paste0("./Results/2 branch/", gsub(" ", "_", cell_type), "_markers.xlsx")
+  write_xlsx(topgene[[cell_type]], path = file_name)
+}
+
+# scRNAseq <- NormalizeData(scRNAseq, normalization.method = "LogNormalize", scale.factor = 10000)
+# scRNAseq <- FindVariableFeatures(scRNAseq, selection.method = "vst", nfeatures = 2000)
+# scRNAseq <- ScaleData(scRNAseq,features = rownames(scRNAseq))
+# DoHeatmap(scRNAseq,  # seurat object (data)
+#           features = topgene[[cell_type]]$gene,  # genes to plot
+#           label = F,  # whether to add label information in the plot
+#           slot = "scale.data",  # expression matrix used for plotting
+#           group.by = 'State',  # grouping name
+#           group.bar = T)  # whether to show bar
+
+
+########## 3.2 Annotate each cell state ##########
+annodata = fread("./Results/2 branch/CELLxGENE_gene_expression_101525.csv")
+# table(annodata$`Cell Type`)
+
+markers_state = list()
+cell_subtype = list()
+markers_db = list()
+state_anno = list()
+
+# cell_type = "CD14 Mono"
+# cell_type = "CD4 Naive"
+# cell_type = "CD8 Naive"
+# cell_type = "CD4 TCM"
+
+for (cell_type in names(topgene)) {
+  ### List subtypes
+  if (cell_type == "CD14 Mono") {
+    cell_subtype[[cell_type]] = c(
+      # "CD14-positive monocyte",
+      # 【CD14-positive monocyte】
+      # CD14-positive monocytes include three subsets of human monocytes: 【CD14-positive, CD16-negative】 classical monocytes; 【CD14-positive, CD16-positive】 intermediate monocytes; and 【CD14-low, CD16-positive】 non-classical monocytes.
+      # These cells are produced in the bone marrow and enter the bloodstream, playing a central role in immune response and inflammation regulation.
+      # 
+      # The main function of 【classical monocytes】 is to serve as the first line of defense against infections.
+      # They are ready to migrate to infection sites and express pattern recognition receptors to help identify and phagocytose pathogens, thereby eliminating them.
+      # Classical monocytes also participate in inflammatory responses by producing various pro-inflammatory cytokines.
+      # Under pathological conditions such as infection or injury, classical monocytes respond to specific tissue signals to leave the bloodstream and migrate to affected sites.
+      # Upon arrival, these cells can differentiate into various cell types such as macrophages and dendritic cells to combat specific pathogens or injuries.
+      # 
+      # 【Intermediate monocytes】 exhibit characteristics of both classical and non-classical monocytes in terms of phenotypic features, functional capabilities, and gene expression profiles.
+      # They highly express CD14 like classical monocytes, while also expressing CD16 (similar to non-classical monocytes).
+      # Compared to classical and non-classical monocytes, these cells typically release fewer cytokines but produce the most reactive oxygen species.
+      # Intermediate monocytes can also induce T-cell proliferation and highly express major histocompatibility complex molecules for antigen presentation.
+      # They appear to play roles in inflammatory conditions, although their specific functions are not fully understood.
+      # 
+      # 【Non-classical monocytes】 are responsible for patrolling vascular endothelium and crossing the endothelium upon sensing inflammation or injury.
+      # They also participate in clearing damaged cells through phagocytosis.
+      # This process allows cells to engulf and eliminate pathogens, debris, and apoptotic cells.
+      # Under homeostatic conditions, these monocytes have important functions in maintaining vascular integrity.
+      
+      "CD14-positive, CD16-negative classical monocyte", 
+      # 【CD14-positive, CD16-negative classical monocyte】
+      # CD14-positive CD16-negative classical monocytes are a subtype of monocytes that constitute a key component of the human immune system.
+      # These cells are produced in the bone marrow and enter the bloodstream, playing a central role in immune response and inflammation regulation.
+      # They constitute the vast majority of circulating monocytes in the body, typically accounting for about 80-90% of total monocytes.
+      # 
+      # The main function of these classical monocytes is to serve as the first line of defense against infections.
+      # They are ready to migrate to infection sites and express pattern recognition receptors to help identify and phagocytose pathogens, thereby eliminating them.
+      # Classical monocytes also participate in inflammatory responses by producing various pro-inflammatory cytokines.
+      # 
+      # Under pathological conditions such as infection or injury, classical monocytes respond to specific tissue signals to leave the bloodstream and migrate to affected sites.
+      # Upon arrival, these cells can differentiate into various cell types such as macrophages and dendritic cells to combat specific pathogens or injuries.
+      # Dysregulated monocyte activity can lead to various human diseases including inflammation, infection, tissue damage, and various autoimmune diseases.
+      
+      "CD14-positive, CD16-positive monocyte", 
+      # 【CD14-positive, CD16-positive monocyte (intermediate monocyte)】
+      # Intermediate monocytes, also defined as CD14++CD16+ monocytes, are one of the three subsets of human monocytes (the other two being classical and non-classical monocytes).
+      # These cells play key roles in the physiological functions of the immune system, particularly crucial for the human body's response to inflammation and infection.
+      # With their diverse functions, intermediate monocytes uniquely enhance the effectiveness of immune responses by bridging classical and non-classical monocyte subsets.
+      # 
+      # In terms of phenotypic characteristics, functional capabilities, and gene expression profiles, intermediate monocytes demonstrate a combination of features from the other two subsets.
+      # They highly express CD14 like classical monocytes, while also expressing CD16 like non-classical monocytes.
+      # Compared to classical and non-classical monocytes, these cells typically release fewer cytokines but produce the most reactive oxygen species.
+      # Intermediate monocytes can also induce T-cell proliferation and highly express major histocompatibility complex molecules for antigen presentation, which is crucial for initiating adaptive immune responses.
+      # 
+      # Under severe inflammation and infection conditions, the relative number of intermediate monocytes in the blood increases, although their specific roles in these processes are not fully understood.
+      # Additionally, some studies report findings that study intermediate and non-classical monocytes as a mixed population, making it more complex to precisely define the unique functions of intermediate monocytes.
+      
+      "CD14-low, CD16-positive monocyte"
+    )
+  } else if (cell_type == "CD4 Naive") {
+    cell_subtype[[cell_type]] = grep("T cell", unique(annodata[["Cell Type"]]), value = TRUE)
+  } else if  (cell_type == "CD8 Naive") {
+    cell_subtype[[cell_type]] = grep("T cell", unique(annodata[["Cell Type"]]), value = TRUE)
+  } else if  (cell_type == "CD4 TCM") {
+    cell_subtype[[cell_type]] = grep("T cell", unique(annodata[["Cell Type"]]), value = TRUE)
+  }
+  
+  ### Get marker gene database for subtype annotation
+  markers_db[[cell_type]] = list()
+  for (subtype in cell_subtype[[cell_type]]) {
+    markers_db[[cell_type]][[subtype]] = annodata[annodata$`Cell Type` == subtype, ]
+  }
+  
+  ### Get marker genes for each cell state (subtypes to be annotated)
+  markers_state[[cell_type]] <- split(topgene[[cell_type]], topgene[[cell_type]]$cluster)
+  for (state in names(markers_state[[cell_type]])) {
+    if (nrow(markers_state[[cell_type]][[state]]) == 0) {
+      markers_state[[cell_type]][[state]] = NULL
+    }
+  }
+  
+  ### Annotate marker genes for each cell state
+  # Use annotation data to score marker genes for each cell state. If a gene is both in the cell state marker gene set and in a certain cell type annotation marker,
+  # its score is: this gene's cell state "ave_log2FC" (divided by maximum) * the cell type annotation marker's "Expression, Scaled" * "Number of Cells Expressing Genes" (divided by maximum)
+  for (state in names(markers_state[[cell_type]])) {
+    markers_state[[cell_type]][[state]] = as.data.frame(markers_state[[cell_type]][[state]])
+    rownames(markers_state[[cell_type]][[state]]) = markers_state[[cell_type]][[state]][["gene"]]
+    for (subtype in cell_subtype[[cell_type]]) {
+      markers_state[[cell_type]][[state]][[subtype]] = 0
+      for (marker in markers_state[[cell_type]][[state]][["gene"]]) {
+        if (marker %in% markers_db[[cell_type]][[subtype]][["Gene Symbol"]]) {
+          X = markers_db[[cell_type]][[subtype]]
+          Y = markers_state[[cell_type]][[state]]
+          score = 
+            (Y[marker, "avg_log2FC"] / max(Y[, "avg_log2FC"])) ^ 2 *
+            X[X[["Gene Symbol"]] == marker, "Expression, Scaled", drop = T] ^ 2 * 
+            (X[X[["Gene Symbol"]] == marker, "Number of Cells Expressing Genes"] / max(X[, "Number of Cells Expressing Genes"]))
+          markers_state[[cell_type]][[state]][marker, subtype] <- as.numeric(score)
+          rm(X, Y, score)
+        }
+      }
+    }
+  }
+  
+  # Based on each marker gene's score, calculate the total score for annotated cell types
+  state_anno[[cell_type]] = list()
+  state_anno[[cell_type]][["anno_df"]] = as.data.frame(matrix(
+    0, 
+    nrow = length(names(markers_state[[cell_type]])), 
+    ncol = length(cell_subtype[[cell_type]]), 
+    dimnames = list(names(markers_state[[cell_type]]), cell_subtype[[cell_type]])))
+  for (state in rownames(state_anno[[cell_type]][["anno_df"]])) {
+    for (subtype in colnames(state_anno[[cell_type]][["anno_df"]])) {
+      state_anno[[cell_type]][["anno_df"]][state, subtype] = sum(markers_state[[cell_type]][[state]][[subtype]])
+    }
+  }
+  
+  # Select the annotation type with the highest total score as the annotation result
+  state_anno[[cell_type]][["result"]] = as.data.frame(matrix(
+    0, 
+    nrow = length(names(markers_state[[cell_type]])), 
+    ncol = 3, 
+    dimnames = list(names(markers_state[[cell_type]]), c("cell_subtype", "score_retio", "cell_subtype_numbers"))))
+  for (state in rownames(state_anno[[cell_type]][["result"]])) {
+    state_anno[[cell_type]][["result"]][state, "cell_subtype"] <- names(which.max(state_anno[[cell_type]][["anno_df"]][state, ]))
+    row_data <- state_anno[[cell_type]][["anno_df"]][state, ]
+    state_anno[[cell_type]][["result"]][state, "score_retio"] <- max(row_data) / sum(row_data)
+    state_anno[[cell_type]][["result"]][state, "cell_subtype_numbers"] = length(cell_subtype[[cell_type]])
+  }; rm(row_data)
+  
+  # Extract marker genes used for annotation
+  for (state in rownames(state_anno[[cell_type]][["result"]])) {
+    state_anno[[cell_type]][[state]] = markers_state[[cell_type]][[state]]
+    state_anno[[cell_type]][[state]] = state_anno[[cell_type]][[state]][, c(
+      "gene", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj", "cluster", state_anno[[cell_type]][["result"]][state, "cell_subtype"])]
+    Z = state_anno[[cell_type]][[state]]
+    state_anno[[cell_type]][[state]] <- Z[Z[, ncol(Z)] > 0, ]
+    rm(Z)
+    # state_anno[[cell_type]][[state]] = state_anno[[cell_type]][[state]][, c(
+    #   "gene", "p_val")]
+  }
+  # state_anno[[cell_type]]
+}
+
+base::saveRDS(markers_state, file = "./Results/3 network new/markers_state.rds")
+base::saveRDS(state_anno, file = "./Results/3 network new/state_anno.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno" # Annotation for each cell state
+)))
+# key_information <- readRDS("./Results/3 network new/key_information.rds")
+# key_gene_analysis <- readRDS("./Results/3 network new/key_gene_analysis.rds")
+# result_LR_filtered = readRDS("./Results/3 network new/result_LR_filtered.rds")
+
+
+########## 3.3 Record Results ##########
+### Record state annotation results and state marker gene results
+for(cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["state_markers"]] = markers_state[[cell_type]]
+  key_gene_analysis[[cell_type]][["state_annotaion"]] = state_anno[[cell_type]]
+}; rm(cell_type)
+
+### Record marker genes for each state
+for(cell_type in cell_types) {
+  # cell_type = cell_types[1]
+  for (state in names(key_gene_analysis[[cell_type]][["state_markers"]])) {
+    # state = names(key_gene_analysis[[cell_type]][["state_markers"]])[1]
+    key_gene_analysis[[cell_type]][["summary"]][[paste0("state_", state, "_marker (ave_log2FC)")]] = 0
+    for (type_gene in rownames(key_gene_analysis[[cell_type]][["summary"]])) {
+      # type_gene = rownames(key_gene_analysis[[cell_type]][["summary"]])[1]
+      gene <- strsplit(type_gene, "_")[[1]][2]
+      if (gene %in% markers_state[[cell_type]][[state]][["gene"]]) {
+        if (markers_state[[cell_type]][[state]][gene, "avg_log2FC"] > 1) {
+          key_gene_analysis[[cell_type]][["summary"]][type_gene, paste0("state_", state, "_marker (ave_log2FC)")] = 
+            markers_state[[cell_type]][[state]][gene, "avg_log2FC"]
+        }
+      }
+    }
+  }
+}
+
+### Get branch division
+branches = list()
+for (cell_type in cell_types) {
+  # cell_type = cell_types[1]
+  branches[[cell_type]] = list()
+  interest_cell_type_Branches <- readRDS(paste0(
+    "./pr50 newest for paper/", 
+    cell_type, 
+    " result pr50/2.1 Data Processing - Pseudotime Analysis And Cell Branching Assignment/interest_cell_type_Branches.rds"
+  ))
+  for (branch in 1:length(interest_cell_type_Branches[[cell_type]])) {
+    # branch = 1
+    states_in_branch = names(table(interest_cell_type_Branches[[cell_type]][[branch]][["State"]]))
+    cell_number_in_branch = as.numeric(table(interest_cell_type_Branches[[cell_type]][[branch]][["State"]]))
+    names(cell_number_in_branch) = states_in_branch
+    if (cell_type == "CD4 TCM") {
+      cell_number_in_branch <- cell_number_in_branch[names(cell_number_in_branch) != "3"]
+    }
+    cell_number_in_branch = cell_number_in_branch[cell_number_in_branch > 0]
+    ratio_in_branch = cell_number_in_branch / sum(cell_number_in_branch)
+    branches[[cell_type]][[paste0("branch_", branch)]] = ratio_in_branch
+  }
+}; rm(cell_type, interest_cell_type_Branches, branch, states_in_branch, cell_number_in_branch, ratio_in_branch)
+
+### Record hub genes for branches (any hub gene from any state within the branch counts)
+for(cell_type in cell_types) {
+  # cell_type = cell_types[1]
+  for (branch in names(branches[[cell_type]])) {
+    # branch = names(branches[[cell_type]])[1]
+    states_in_branch = names(branches[[cell_type]][[branch]])
+    score = rep(0, nrow(key_gene_analysis[[cell_type]][["summary"]]))
+    for (state in states_in_branch) {
+      # state = states_in_branch[1]
+      score = score + branches[[cell_type]][[branch]][[state]] * as.logical(
+        key_gene_analysis[[cell_type]][["summary"]][[paste0("state_", state, "_marker (ave_log2FC)")]]
+      )
+    }
+    key_gene_analysis[[cell_type]][["summary"]][[paste0(
+      branch, paste0(" (state ", paste(states_in_branch, collapse = ",")), ") (cell frequency)"
+    )]] = score
+  }
+}
+
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno" # Annotation for each cell state
+)))
+
+
+
+############### 4 Find markers and annotate for each cell label ###############
+# Result: Only CD14 Mono found markers, all other subgroups failed to annotate
+
+library(Seurat)
+library(dplyr)
+library(SeuratObject)
+library(writexl)
+library(data.table)
+
+# setwd("/mnt/d/pbmc-equation/")
+setwd("D:/pbmc-equation/")
+
+
+########## 4.1 Get marker genes for each cell label ##########
+n_top = 100000
+
+scRNAseq <- readRDS("./scRNAseq.rds")
+scRNAseq <- subset(scRNAseq, subset = seurat_annotations == cell_types_all)
+
+diff.wilcox = FindAllMarkers(scRNAseq, group.by = "seurat_annotations")
+all.markers = diff.wilcox %>% dplyr::select(gene, everything()) %>% subset(p_val<0.05) %>% subset(p_val_adj<0.05) %>% subset(avg_log2FC>0)
+topgene = all.markers %>% group_by(cluster) %>% top_n(n = n_top, wt = avg_log2FC) %>% arrange(cluster, desc(avg_log2FC))
+rm(diff.wilcox, all.markers)
+write_xlsx(topgene, path = "./Results/2 branch/cell_types_all_markers.xlsx")
+
+
+
+########## 4.2 Get marker gene data for each cell label ##########
+annodata = fread("./Results/2 branch/CELLxGENE_gene_expression_101525.csv")
+# table(annodata$`Cell Type`)
+
+cell_type_markers = list()
+cell_type_name = list()
+markers_db = list()
+
+# cell_type = "CD14 Mono"
+# cell_type = "CD4 Naive"
+# cell_type = "CD8 Naive"
+# cell_type = "CD4 TCM"
+for (cell_type in cell_types) {
+  ### Cell type matching
+  if (cell_type == "CD14 Mono") {
+    cell_type_name[[cell_type]] = "CD14-positive monocyte"
+    # CD14-positive monocytes include three subsets of human monocytes:
+    # CD14-positive, CD16-negative classical monocytes; CD14-positive, CD16-positive intermediate monocytes; and CD14-low, CD16-positive non-classical monocytes.
+    # These cells are produced in the bone marrow and enter the bloodstream, playing a central role in immune response and inflammation regulation.
+    
+    # The main function of classical monocytes is to serve as the first line of defense against infections.
+    # They are ready to migrate to infection sites and express pattern recognition receptors to help identify and phagocytose pathogens, thereby eliminating these threats.
+    # Classical monocytes also participate in inflammatory responses by producing several pro-inflammatory cytokines.
+    # In response to specific signals from tissues under pathological conditions such as infection or injury, classical monocytes can leave the bloodstream and migrate to affected sites.
+    # Upon arrival, these cells differentiate into various cell types including macrophages and dendritic cells to combat specific pathogens or injuries.
+    
+    # Intermediate monocytes exhibit characteristics of both classical and non-classical monocytes in terms of phenotypic features, functional capabilities, and gene expression profiles.
+    # They highly express CD14 like classical monocytes, while also expressing CD16 (similar to non-classical monocytes).
+    # Compared to classical and non-classical monocytes, these cells typically release fewer cytokines but produce the most reactive oxygen species.
+    # Intermediate monocytes can also induce T cell proliferation and highly express major histocompatibility complex molecules for antigen presentation.
+    # Although their functions are not fully understood, intermediate monocytes appear to play roles in inflammatory conditions.
+    
+    # Finally, non-classical monocytes are responsible for patrolling the endothelium and crossing the endothelium upon sensing inflammation or injury.
+    # Non-classical monocytes also participate in clearing damaged cells through phagocytosis.
+    # Under homeostatic conditions, these cells appear to have important functions in maintaining vascular integrity.
+  } else if (cell_type == "CD4 Naive") {
+    cell_type_name[[cell_type]] = "naive thymus-derived CD4-positive, alpha-beta T cell"
+    # Naive thymus-derived CD4-positive alpha-beta T cells are an important immune cell type in the adaptive immune system.
+    # They originate from the thymus, differentiating from immature thymocytes through a process of gene rearrangement that results in the surface expression of a unique alpha-beta T cell receptor (TCR).
+    # These cells are classified as "naive" because they have not yet encountered their specific antigen.
+    # This naive state is characterized by readiness for activation and no memory of past antigen exposure.
+    
+    # After completing their developmental program within the thymus, these cells are exported to the periphery as recent thymic emigrants and circulate throughout the body.
+    # Naive cells are capable of responding to their specific antigens.
+    
+    # CD4+ T cells are crucial for initiating immune responses.
+    # Upon antigen exposure, they undergo activation, proliferation, and differentiation processes.
+    # Activation occurs when the TCR on naive CD4+ T cells binds to antigen-MHC class II molecules on antigen-presenting cells and receives additional co-stimulatory signals.
+    # Once activated, naive CD4+ T cells proliferate extensively and differentiate into specific effector T cell subsets,
+    # such as T helper 1 (Th1), T helper 2 (Th2), T helper 17 (Th17), and follicular helper T (Tfh) cells,
+    # each secreting different cytokines and performing distinct functions to help generate specific immune responses against different types of pathogens.
+    # Among these, Th1 cells participate in combating intracellular pathogens (such as viruses and certain bacteria), Th2 cells defend against extracellular parasites and participate in allergic reactions,
+    # Th17 cells provide immunity against extracellular bacteria and fungi, while Tfh cells play roles in B cell activation and antibody production, thus being crucial for humoral immune responses.
+  } else if  (cell_type == "CD8 Naive") {
+    cell_type_name[[cell_type]] = "naive thymus-derived CD8-positive, alpha-beta T cell"
+    # Naive thymus-derived CD8-positive alpha-beta T cells are an important immune cell type in the adaptive immune system.
+    # These lymphocytes originate from the thymus, differentiating from immature thymocytes through a process of gene rearrangement that results in the surface expression of a unique alpha-beta T cell receptor (TCR).
+    # These cells are classified as "naive" because they have not yet encountered their specific antigen.
+    # This naive state is characterized by readiness for activation and no memory of past antigen exposure.
+    
+    # After completing their developmental program within the thymus, these cells are released to the periphery as recent thymic emigrants and circulate throughout the body.
+    # These cells continue post-thymic maturation, eventually developing into mature naive CD8+ T cells.
+    # At this point, naive cells are capable of responding to their specific antigens.
+    
+    # CD8+ T cells can recognize and eliminate cells presenting foreign or abnormal antigens in the context of major histocompatibility complex (MHC) class I molecules,
+    # making them crucial in responding to intracellular pathogens (such as viruses or bacteria infecting host cells) and cancer.
+    # When naive T cells encounter their specific antigens through antigen-presenting cells, they become activated and differentiate into effector cells,
+    # which can recognize and destroy infected or malignant cells.
+    # The resulting cytotoxic T cells can release cytotoxic mediators such as perforin and granzymes, inducing apoptosis in target cells.
+  } else if  (cell_type == "CD4 TCM") {
+    cell_type_name[[cell_type]] = "central memory CD4-positive, alpha-beta T cell"
+    # Central memory CD4-positive alpha-beta T cells, commonly abbreviated as central memory T cells or Tcm, are a subset of T cells and a key component of the adaptive immune system.
+    # They differentiate from activated effector T cells and play a central role in maintaining long-term immunity against previously encountered antigens.
+    # Together they form the basis of long-term immune memory, enabling the immune system to respond rapidly to known pathogens.
+    
+    # These cells are defined by expression of alpha-beta T cell receptors and CD4 molecules, allowing them to recognize antigens and initiate subsequent immune responses.
+    # Additionally, these cells typically express the memory T cell marker CD45RO, as well as CCR7 and CD62L, which distinguish them from effector memory T cells that do not express these markers.
+    # Expression of CD62L and CCR7 facilitates their homing to lymphoid tissues, positioning them in secondary lymphoid organs (such as lymph nodes and spleen) where antigen recognition and immune response activation occur.
+    
+    # Central memory T cells circulate between secondary lymphoid organs, performing immune surveillance by sampling antigens accumulated in lymphoid tissues.
+    # Upon re-encounter with antigen, these cells can secrete interleukin-2 and exhibit significant proliferative capacity,
+    # thereby serving as an important reservoir for effector memory T cells, supporting sustained immune protection.
+  }
+  
+  ### Get marker gene database for subtype annotation
+  markers_db[[cell_type]] = annodata[annodata$`Cell Type` == cell_type_name[[cell_type]], ]
+  
+  ### Get marker genes for each cell state (subtypes to be annotated)
+  cell_type_markers[[cell_type]] = as.data.frame(split(topgene, topgene$cluster)[[cell_type]])
+  
+  ### Filter markers found by FindAllMarkers using database markers
+  cell_type_markers[[cell_type]][["keep"]] = FALSE
+  rownames(cell_type_markers[[cell_type]]) = cell_type_markers[[cell_type]][["gene"]]
+  for (marker in cell_type_markers[[cell_type]][["gene"]]) {
+    # marker = cell_type_markers[[cell_type]][["gene"]][1]
+    if (marker %in% markers_db[[cell_type]][["Gene Symbol"]]) {
+      cell_type_markers[[cell_type]][marker, "keep"] = TRUE
+    }
+  }
+  cell_type_markers[[cell_type]] <- dplyr::filter(cell_type_markers[[cell_type]], keep)
+}
+base::saveRDS(cell_type_markers, file = "./Results/3 network new/cell_type_markers.rds")
+
+
+
+########## 4.3 Record Results ##########
+### Record state annotation results and state marker gene results
+for(cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["cell_type_markers"]] = cell_type_markers[[cell_type]]
+}; rm(cell_type)
+
+### Record marker genes for each cell_type
+for(cell_type in cell_types) {
+  # cell_type = cell_types[1]
+  key_gene_analysis[[cell_type]][["summary"]][["type_marker (ave_log2FC)"]] = 0
+  for (type_gene in rownames(key_gene_analysis[[cell_type]][["summary"]])) {
+    # type_gene = rownames(key_gene_analysis[[cell_type]][["summary"]])[1]
+    gene <- strsplit(type_gene, "_")[[1]][2]
+    if (gene %in% cell_type_markers[[cell_type]][["gene"]]) {
+      if (cell_type_markers[[cell_type]][gene, "avg_log2FC"] > 0) {
+        key_gene_analysis[[cell_type]][["summary"]][type_gene, "type_marker (ave_log2FC)"] = 
+          cell_type_markers[[cell_type]][gene, "avg_log2FC"]
+      }
+    }
+  }
+}
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers" # Markers for each cell type
+)))
+
+
+
+
+############### 5 Enrichment analysis for core pGRN hub gene sets ###############
+library(dplyr)
+library(Seurat)
+library(clusterProfiler)
+library(ggplot2)
+library(reshape2)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+
+########## 5.1 Prepare enrichment analysis data ##########
+# Get full key gene sets (union of iGRN and pGRN key gene sets)
+hub_genes = list()
+for (cell_type in cell_types) {
+  hub_genes[[cell_type]][["SYMBOL"]] = unique(key_gene_analysis[[cell_type]][["summary"]][["gene"]])
+  hub_genes[[cell_type]][["ENTREZID"]] = bitr(
+    hub_genes[[cell_type]][["SYMBOL"]], 
+    fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db
+  )[, "ENTREZID"]
+}
+
+# Get omics data for full key gene sets
+# scRNAseq <- subset(scRNAseq, features = hub_genes_all_SYMBOL, subset = seurat_annotations == cell_type)
+# scATACseq <- subset(scATACseq, features = hub_genes_all_SYMBOL, subset = seurat_annotations == cell_type)
+# scRNAseq = NormalizeData(scRNAseq)
+# scATACseq = NormalizeData(scATACseq)
+
+
+
+########## 5.2 Enrichment analysis ##########
+enrich = list()
+
+### Define conversion function
+convert_fraction <- function(fraction_str) {
+  sapply(strsplit(fraction_str, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2]))
+}
+
+### Set enrichment analysis thresholds
+for (cell_type in cell_types) {
+  enrich[[cell_type]] = list()
+  
+  if (cell_type == "CD14 Mono") {
+    enrich[[cell_type]][["threshold"]][["count"]] = 1
+    enrich[[cell_type]][["threshold"]][["generatio"]] = 0.15
+    enrich[[cell_type]][["threshold"]][["pq"]] = 0.05
+  } else if (cell_type == "CD4 Naive") {
+    enrich[[cell_type]][["threshold"]][["count"]] = 1
+    enrich[[cell_type]][["threshold"]][["generatio"]] = 0.15
+    enrich[[cell_type]][["threshold"]][["pq"]] = 0.05
+  } else if (cell_type == "CD8 Naive") {
+    enrich[[cell_type]][["threshold"]][["count"]] = 1
+    enrich[[cell_type]][["threshold"]][["generatio"]] = 0.15
+    enrich[[cell_type]][["threshold"]][["pq"]] = 0.05
+  } else if (cell_type == "CD4 TCM") {
+    enrich[[cell_type]][["threshold"]][["count"]] = 1
+    enrich[[cell_type]][["threshold"]][["generatio"]] = 0.15
+    enrich[[cell_type]][["threshold"]][["pq"]] = 0.05
+  }
+}
+
+### Enrichment analysis
+for (cell_type in cell_types) {  
+  # cell_type = cell_types[1]
+  
+  ### Extract enrichment thresholds
+  count_threshold = enrich[[cell_type]][["threshold"]][["count"]]
+  generatio_threshold = enrich[[cell_type]][["threshold"]][["generatio"]]
+  pq_threshold = enrich[[cell_type]][["threshold"]][["pq"]]
+  
+  ### GO enrichment analysis ###
+  enrichGO_hub_genes_all <- enrichGO(
+    gene = hub_genes[[cell_type]][["SYMBOL"]], OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "ALL", 
+    minGSSize = 2, readable = TRUE, pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"
+  )
+  enrich[[cell_type]][["GO"]] = enrichGO_hub_genes_all
+  
+  # Insert: Get empty enrichment data structure
+  enrich_empty = enrichGO_hub_genes_all
+  enrich_empty@result <- enrich_empty@result[FALSE, ]
+  enrich_empty@ontology = character(0)
+  enrich_empty@gene = character(0)
+  enrich_empty@universe = character(0)
+  enrich_empty@geneSets = list()
+  enrich[["empty"]] = enrich_empty
+  
+  if (!is.null(enrichGO_hub_genes_all)) {
+    enrichGO_hub_genes_all_filtered = clusterProfiler::simplify(enrichGO_hub_genes_all)
+    result = enrichGO_hub_genes_all_filtered@result
+    result <- result[order(-result$FoldEnrichment), ]
+    result = result[result$Count > count_threshold | convert_fraction(result$GeneRatio) >= generatio_threshold, ]
+    result = result[result$pvalue < pq_threshold & result$p.adjust < pq_threshold & result$qvalue < pq_threshold, ]
+    enrichGO_hub_genes_all_filtered@result = result; rm(result)
+  } else {enrichGO_hub_genes_all_filtered = enrich_empty}
+  enrich[[cell_type]][["GO_filtered"]] = enrichGO_hub_genes_all_filtered
+  
+  ### KEGG enrichment analysis ###
+  enrichKEGG_hub_genes_all <- enrichKEGG(
+    gene = hub_genes[[cell_type]][["ENTREZID"]], keyType = "kegg", organism = "hsa",
+    minGSSize = 2, use_internal_data = FALSE, pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"
+  )
+  enrich[[cell_type]][["KEGG"]] = enrichKEGG_hub_genes_all
+  
+  if (!is.null(enrichKEGG_hub_genes_all)) {
+    enrichKEGG_hub_genes_all <- setReadable(enrichKEGG_hub_genes_all, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+    enrich[[cell_type]][["KEGG"]] = enrichKEGG_hub_genes_all
+    enrichKEGG_hub_genes_all_filtered = enrichKEGG_hub_genes_all
+    result = enrichKEGG_hub_genes_all_filtered@result
+    result <- result[order(-result$FoldEnrichment), ]
+    result = result[result$Count > count_threshold | convert_fraction(result$GeneRatio) >= generatio_threshold, ]
+    result = result[result$pvalue < pq_threshold & result$p.adjust < pq_threshold & result$qvalue < pq_threshold, ]
+    enrichKEGG_hub_genes_all_filtered@result = result; rm(result)
+  } else {enrichKEGG_hub_genes_all_filtered = enrich_empty}
+  enrich[[cell_type]][["KEGG_filtered"]] = enrichKEGG_hub_genes_all_filtered
+  
+  ### KEGG module enrichment analysis ###
+  enrichMKEGG_hub_genes_all <- enrichMKEGG(
+    gene = hub_genes[[cell_type]][["ENTREZID"]], keyType = "kegg", organism = "hsa", 
+    minGSSize = 2, pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"
+  )
+  enrich[[cell_type]][["MKEGG"]] = enrichMKEGG_hub_genes_all
+  
+  if (!is.null(enrichMKEGG_hub_genes_all)) {
+    enrichMKEGG_hub_genes_all <- setReadable(enrichMKEGG_hub_genes_all, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+    enrich[[cell_type]][["MKEGG"]] = enrichMKEGG_hub_genes_all
+    enrichMKEGG_hub_genes_all_filtered = enrichMKEGG_hub_genes_all
+    result = enrichMKEGG_hub_genes_all_filtered@result
+    result <- result[order(-result$FoldEnrichment), ]
+    result = result[result$Count > count_threshold | convert_fraction(result$GeneRatio) >= generatio_threshold, ]
+    result = result[result$pvalue < pq_threshold & result$p.adjust < pq_threshold & result$qvalue < pq_threshold, ]
+    enrichMKEGG_hub_genes_all_filtered@result = result; rm(result)
+  } else {enrichMKEGG_hub_genes_all_filtered = enrich_empty}
+  enrich[[cell_type]][["MKEGG_filtered"]] = enrichMKEGG_hub_genes_all_filtered
+  
+  ### Pathway Commons enrichment analysis ###
+  # Including but not limited to: pathway databases KEGG Pathway, Reactome, PANTHER Pathway, WikiPathways, NCI Pathway Interaction Database, NetPath; protein-protein interaction (PPI) databases BioGRID, HPRD, IntAct
+  enrichPC_hub_genes_all <- enrichPC(
+    gene = hub_genes[[cell_type]][["SYMBOL"]], 
+    minGSSize = 2, pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"
+  )
+  enrich[[cell_type]][["PC"]] = enrichPC_hub_genes_all
+  
+  if (!is.null(enrichPC_hub_genes_all)) {
+    enrichPC_hub_genes_all_filtered = enrichPC_hub_genes_all
+    result = enrichPC_hub_genes_all_filtered@result
+    result <- result[order(-result$FoldEnrichment), ]
+    result = result[result$Count > count_threshold | convert_fraction(result$GeneRatio) >= generatio_threshold, ]
+    result = result[result$pvalue < pq_threshold & result$p.adjust < pq_threshold & result$qvalue < pq_threshold, ]
+    enrichPC_hub_genes_all_filtered@result = result; rm(result)
+  } else {enrichPC_hub_genes_all_filtered = enrich_empty}
+  enrich[[cell_type]][["PC_filtered"]] = enrichPC_hub_genes_all_filtered
+  
+  ### WikiPathways enrichment analysis ###
+  enrichWP_hub_genes_all <- enrichWP(
+    gene = hub_genes[[cell_type]][["ENTREZID"]], organism = "Homo sapiens", 
+    minGSSize = 2, pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"
+  )
+  # May timeout and error
+  # download.file(
+  #   url = "https://data.wikipathways.org/current/gmt/wikipathways-20250910-gmt-Homo_sapiens.gmt",
+  #   destfile = "./Results/4 enrichment/wikipathways-20250910-gmt-Homo_sapiens.gmt",
+  #   mode = "wb"
+  # )
+  # wp_gmt <- clusterProfiler::read.gmt("./Results/4 enrichment/wikipathways-20250910-gmt-Homo_sapiens.gmt")
+  # enrichWP_hub_genes_all <- enricher(
+  #   gene = hub_genes[[cell_type]][["ENTREZID"]],
+  #   pvalueCutoff = 0.05,
+  #   pAdjustMethod = "BH",
+  #   minGSSize = 2,
+  #   qvalueCutoff = 0.2,
+  #   TERM2GENE = wp_gmt
+  # )
+  enrich[[cell_type]][["WP"]] = enrichWP_hub_genes_all
+  
+  if (!is.null(enrichWP_hub_genes_all)) {
+    enrichWP_hub_genes_all <- setReadable(enrichWP_hub_genes_all, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+    enrich[[cell_type]][["WP"]] = enrichWP_hub_genes_all
+    enrichWP_hub_genes_all_filtered = enrichWP_hub_genes_all
+    result = enrichWP_hub_genes_all_filtered@result
+    result <- result[order(-result$FoldEnrichment), ]
+    result = result[result$Count > count_threshold | convert_fraction(result$GeneRatio) >= generatio_threshold, ]
+    result = result[result$pvalue < pq_threshold & result$p.adjust < pq_threshold & result$qvalue < pq_threshold, ]
+    enrichWP_hub_genes_all_filtered@result = result; rm(result)
+  } else {enrichWP_hub_genes_all_filtered = enrich_empty}
+  enrich[[cell_type]][["WP_filtered"]] = enrichWP_hub_genes_all_filtered
+  
+  ### Enrichment analysis summary ###
+  # Write GO
+  enrich_hub_genes_all_filtered = enrichGO_hub_genes_all_filtered
+  enrich_hub_genes_all_filtered@result$ID = paste0(enrich_hub_genes_all_filtered@result$ONTOLOGY, ".", enrich_hub_genes_all_filtered@result$ID)
+  enrich_hub_genes_all_filtered@result$ONTOLOGY = NULL
+  
+  # Write KEGG result
+  result = enrichKEGG_hub_genes_all_filtered@result
+  result$ID = paste(result$category, result$subcategory, result$ID, sep = ".")
+  result$category = NULL; result$subcategory = NULL
+  enrich_hub_genes_all_filtered@result = rbind(enrich_hub_genes_all_filtered@result, result); rm(result)
+  
+  # Write KEGG ontology
+  enrich_hub_genes_all_filtered@ontology = c(enrich_hub_genes_all_filtered@ontology, enrichKEGG_hub_genes_all_filtered@ontology)
+  
+  # Write KEGG universe
+  enrich_hub_genes_all_filtered@universe <- unique(c(
+    enrich_hub_genes_all_filtered@universe, bitr(enrichKEGG_hub_genes_all_filtered@universe, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)$SYMBOL))
+  
+  # Write KEGG geneSets
+  geneSets = enrichKEGG_hub_genes_all_filtered@geneSets
+  entrez2symbol_map <- bitr(unique(unlist(geneSets, use.names = FALSE)), fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+  map_vector <- setNames(entrez2symbol_map$SYMBOL, entrez2symbol_map$ENTREZID)
+  geneSets <- lapply(geneSets, function(single_geneset) {na.omit(map_vector[single_geneset])}); rm(entrez2symbol_map, map_vector)
+  enrich_hub_genes_all_filtered@geneSets = c(enrich_hub_genes_all_filtered@geneSets, geneSets); rm(geneSets)
+  
+  # Write MKEGG result
+  enrich_hub_genes_all_filtered@result = rbind(enrich_hub_genes_all_filtered@result, enrichMKEGG_hub_genes_all_filtered@result)
+  
+  # Write MKEGG ontology
+  enrich_hub_genes_all_filtered@ontology = c(enrich_hub_genes_all_filtered@ontology, enrichMKEGG_hub_genes_all_filtered@ontology)
+  
+  # Write MKEGG universe
+  enrich_hub_genes_all_filtered@universe <- unique(c(
+    enrich_hub_genes_all_filtered@universe, bitr(enrichMKEGG_hub_genes_all_filtered@universe, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)$SYMBOL))
+  
+  # Write MKEGG geneSets
+  geneSets = enrichMKEGG_hub_genes_all_filtered@geneSets
+  entrez2symbol_map <- bitr(unique(unlist(geneSets, use.names = FALSE)), fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+  map_vector <- setNames(entrez2symbol_map$SYMBOL, entrez2symbol_map$ENTREZID)
+  geneSets <- lapply(geneSets, function(single_geneset) {na.omit(map_vector[single_geneset])}); rm(entrez2symbol_map, map_vector)
+  enrich_hub_genes_all_filtered@geneSets = c(enrich_hub_genes_all_filtered@geneSets, geneSets); rm(geneSets)
+  
+  # Write PC result
+  enrich_hub_genes_all_filtered@result = rbind(enrich_hub_genes_all_filtered@result, enrichPC_hub_genes_all_filtered@result)
+  
+  # Write PC ontology
+  enrich_hub_genes_all_filtered@ontology = c(enrich_hub_genes_all_filtered@ontology, enrichPC_hub_genes_all_filtered@ontology)
+  
+  # Write PC universe
+  enrich_hub_genes_all_filtered@universe <- unique(c(enrich_hub_genes_all_filtered@universe, enrichPC_hub_genes_all_filtered@universe))
+  
+  # Write PC geneSets
+  enrich_hub_genes_all_filtered@geneSets = c(enrich_hub_genes_all_filtered@geneSets, enrichPC_hub_genes_all_filtered@geneSets)
+  
+  # Write WP result
+  enrich_hub_genes_all_filtered@result = rbind(enrich_hub_genes_all_filtered@result, enrichWP_hub_genes_all_filtered@result)
+  
+  # Write WP ontology
+  enrich_hub_genes_all_filtered@ontology = c(enrich_hub_genes_all_filtered@ontology, enrichWP_hub_genes_all_filtered@ontology)
+  
+  # Write WP universe
+  enrich_hub_genes_all_filtered@universe <- unique(c(
+    enrich_hub_genes_all_filtered@universe, bitr(enrichWP_hub_genes_all_filtered@universe, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)$SYMBOL))
+  
+  # Write WP geneSets
+  geneSets = enrichWP_hub_genes_all_filtered@geneSets
+  entrez2symbol_map <- bitr(unique(unlist(geneSets, use.names = FALSE)), fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+  map_vector <- setNames(entrez2symbol_map$SYMBOL, entrez2symbol_map$ENTREZID)
+  geneSets <- lapply(geneSets, function(single_geneset) {na.omit(map_vector[single_geneset])}); rm(entrez2symbol_map, map_vector)
+  enrich_hub_genes_all_filtered@geneSets = c(enrich_hub_genes_all_filtered@geneSets, geneSets); rm(geneSets)
+  
+  enrich_hub_genes_all_filtered@result <- enrich_hub_genes_all_filtered@result %>%
+    filter(pvalue < 0.05, p.adjust < 0.05, qvalue < 0.05, Count > 1) %>%
+    arrange(desc(FoldEnrichment))
+  # print(rownames(enrich_hub_genes_all_filtered@result))
+  enrich[[cell_type]][["all"]] = enrich_hub_genes_all_filtered
+}
+base::saveRDS(enrich, file = "./Results/3 network new/enrich.rds")
+
+
+########## 5.3 Record Results ##########
+for (cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["enrich"]] = enrich[[cell_type]][["all"]]@result
+}
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "hub_genes", # hub genes
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers", # Markers for each cell type
+  "enrich" # Enrichment analysis results
+)))
+
+
+########## 5.4 Evaluate importance of enriched pathways ##########
+for (cell_type in cell_types) {
+  # cell_type = cell_types[1]
+  key_gene_analysis[[cell_type]][["enrich"]][["node_importance_score"]] = 0
+  key_gene_analysis[[cell_type]][["enrich"]][["edge_importance_score"]] = 0
+  
+  for (pathway in rownames(key_gene_analysis[[cell_type]][["enrich"]])) {
+    # pathway = rownames(key_gene_analysis[[cell_type]][["enrich"]])[7]
+    gene_set = key_gene_analysis[[cell_type]][["enrich"]][[pathway, "geneID"]]
+    gene_set = strsplit(gene_set, "/")[[1]]
+    
+    gene_score = gene_set
+    names(gene_score) = gene_set
+    for (gene in gene_set) {
+      # gene = gene_set[1]
+      pos = which(key_gene_analysis[[cell_type]][["summary"]][["gene"]] == gene)
+      type_gene = rownames(key_gene_analysis[[cell_type]][["summary"]])[pos]
+      gene_score[gene] = sum(key_gene_analysis[[cell_type]][["summary"]][type_gene, "importance_score"])
+    }
+    key_gene_analysis[[cell_type]][["enrich"]][pathway, "node_importance_score"] = 
+      sum(as.numeric(gene_score))
+    
+    regulons = rownames(key_gene_analysis[[cell_type]][["centrality"]][["key_edges"]])
+    regulons <- data.frame(
+      TF = sapply(strsplit(regulons, "→"), `[`, 1),
+      TG = sapply(strsplit(regulons, "→"), `[`, 2),
+      row.names = regulons
+    )
+    edge_score = 0
+    for (regulon in rownames(regulons)) {
+      # regulon = rownames(regulons)[1]
+      if (all(unique(as.character(regulons[regulon, ])) %in% gene_set)) {
+        edge_score = edge_score + 
+          key_gene_analysis[[cell_type]][["centrality"]][["key_edges"]][regulon, "importance_score"]
+      }
+    }
+    key_gene_analysis[[cell_type]][["enrich"]][pathway, "edge_importance_score"] = 
+      edge_score
+  }
+  
+  key_gene_analysis[[cell_type]][["enrich"]][["comprehensive_importance_score"]] = 
+    key_gene_analysis[[cell_type]][["enrich"]][["node_importance_score"]] + 
+    key_gene_analysis[[cell_type]][["enrich"]][["edge_importance_score"]]
+}
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+
+########## 5.5 Pathway importance level classification ##########
+convert_fraction <- function(fraction_str) {
+  sapply(strsplit(fraction_str, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2]))
+}
+
+importance_threshold = c(0.95, 0.87, 0.76, 0.62, 0.45, 0.25)
+names(importance_threshold) = 1:6
+for (cell_type in cell_types) {
+  # cell_type = cell_types[2]
+  key_gene_analysis[[cell_type]][["enrich"]][, "importance_level"] = 7
+  
+  print(quantile(key_gene_analysis[[cell_type]][["enrich"]]$Count, importance_threshold))
+  
+  for (level in names(importance_threshold)) {
+    # level = 1
+    
+    result = key_gene_analysis[[cell_type]][["enrich"]]
+    result <- result[order(-result$FoldEnrichment), ]
+    result = result[result$pvalue < 0.01 & result$p.adjust < 0.01 & result$qvalue < 0.01, ]
+    result = result[
+      result$Count >= quantile(result$Count, importance_threshold[level]) |
+        convert_fraction(result$GeneRatio) >= quantile(convert_fraction(result$GeneRatio), importance_threshold[level]) |
+        result$comprehensive_importance_score >= quantile(result$comprehensive_importance_score, importance_threshold[level]),
+    ]
+    pathways = rownames(result)
+    for (pathway in pathways) {
+      # pathway = pathways[1]
+      if (key_gene_analysis[[cell_type]][["enrich"]][pathway, "importance_level"] == 7) {
+        key_gene_analysis[[cell_type]][["enrich"]][pathway, "importance_level"] = level
+      }
+    }
+  }
+}
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "hub_genes", # hub genes
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers", # Markers for each cell type
+  "enrich", # Enrichment analysis results
+  "importance_threshold" # Quantile threshold for importance levels
+)))
+# enrichGO_hub_genes_all_filtered@result = result; rm(result)
+
+
+########## 5.6 Draw bubble plots for enrichment analysis pathways ##########
+library(enrichplot)
+library(ggplot2)
+# install.packages("ggh4x")
+library(ggh4x)
+# install.packages("ggpubr")
+library(ggpubr)
+
+### Bubble plot Dotplot for FoldEnrichment, p.adjust, count of enriched pathways
+dotplots <- list()
+for (cell_type in cell_types) {
+  enrich_result = enrich[["empty"]]
+  enrich_result@result = key_gene_analysis[[cell_type]][["enrich"]]
+  enrich_result@result = enrich_result@result[enrich_result@result$importance_level %in% 1:3, ]
+  colnames(enrich_result@result)[15] = "IS"
+  enrich_result@result$importance_level = paste0("Level ", enrich_result@result$importance_level)
+  enrich_result@result$logFoldEnrichment = log(enrich_result@result$FoldEnrichment)
+  
+  # Create single dotplot
+  dotplots[[cell_type]] <- dotplot(
+    enrich_result, 
+    x = "logFoldEnrichment",
+    color = "qvalue",
+    size = "IS",
+    showCategory = 10000,
+    title = paste0(cell_type, " Pathways Enrichment Dotplot"),
+    label_format = 40
+  ) + facet_wrap(~ importance_level, nrow = 3, scales = "free_y") + 
+    force_panelsizes(
+      rows = as.numeric(table(enrich_result@result$importance_level)) / sum(as.numeric(table(enrich_result@result$importance_level))),
+      cols = 0.8,
+      respect = FALSE
+    ) + 
+    theme(
+      axis.text.y = element_text(size = 5),
+      plot.title = element_text(hjust = 0.5)
+    )
+}
+combined_dotplot <- ggarrange(
+  plotlist = dotplots,  # Specify plot list
+  ncol = 4,             # Set number of columns to 4 for side-by-side
+  nrow = 1,             # Set number of rows to 1
+  labels = NULL,        # Automatically add labels, e.g., "AUTO" A, B, C, D
+  common.legend = FALSE # Set to FALSE if four plots have different legends; if same can set to TRUE and unify legend position
+); combined_dotplot
+ggsave(filename = "./Results/4 enrichment/Pathways Enrichment Dotplot.png", plot = combined_dotplot, 
+       width = 16, height = 12, dpi = 900)
+
+### Record results
+dotplots[["combined"]] = combined_dotplot
+for (cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["pathway_dotplot"]] = dotplots[[cell_type]]
+}
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "hub_genes", # hub genes
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers", # Markers for each cell type
+  "enrich", # Enrichment analysis results
+  "dotplots" # Enrichment analysis pathway bubble plots
+)))
+
+
+########## 5.7 Heatmap Heatplot for gene-pathway ##########
+# Construct gene-pathway relationship matrix
+gene_and_pathway_matrix = list()
+for (cell_type in cell_types) {
+  # cell_type = cell_types[1]
+  gene_and_pathway_matrix[[cell_type]] = list()
+  
+  genes = hub_genes[[cell_type]]$SYMBOL
+  pathways = rownames(key_gene_analysis[[cell_type]][["enrich"]])
+  pathways = gsub("-", "_", gsub(":", ".", pathways))
+  rownames(key_gene_analysis[[cell_type]][["enrich"]]) = pathways
+  
+  # All genes and pathways
+  gene_and_pathway_matrix[[cell_type]][["all"]] <- data.frame(matrix(
+    0, nrow = length(genes), ncol = length(pathways), dimnames = list(genes, pathways)
+  ))
+  for (pathway in pathways) {
+    # pathway = pathways[1]
+    genes_in_pathway = key_gene_analysis[[cell_type]][["enrich"]][pathway, "geneID"]
+    genes_in_pathway <- unlist(strsplit(genes_in_pathway, "/"))
+    for (gene in genes_in_pathway) {
+      # gene = genes_in_pathway[1]
+      if (gene %in% genes) {
+        gene_and_pathway_matrix[[cell_type]][["all"]][gene, pathway] = 
+          key_gene_analysis[[cell_type]][["enrich"]][pathway, "importance_level"]
+      }
+    }
+  }
+  
+  # Genes with importance scores greater than their 80% quantile and pathways with importance levels 1 and 2
+  df_key = gene_and_pathway_matrix[[cell_type]][["all"]]
+  genes_key = with(key_gene_analysis[[cell_type]][["summary"]], 
+                   gene[importance_score > quantile(importance_score, 0.8)])
+  pathways_key = rownames(subset(
+    key_gene_analysis[[cell_type]][["enrich"]], importance_level %in% c(1, 2)
+  ))
+  pathways_key = gsub("-", "_", gsub(":", ".", pathways_key))
+  df_key = df_key[genes_key, pathways_key]
+  df_key <- df_key[rowSums(df_key != 0) > 0, colSums(df_key != 0) > 0]
+  gene_and_pathway_matrix[[cell_type]][["key"]] = df_key
+}
+
+gene_and_pathway_pheatmaps = list()
+for (cell_type in cell_types) {
+  data_numeric <- as.matrix(gene_and_pathway_matrix[[cell_type]][["key"]])
+  mode(data_numeric) <- "numeric" 
+  gene_and_pathway_pheatmaps[[cell_type]] = pheatmap::pheatmap(
+    data_numeric, 
+    color = c("white", "gray20", "gray50", "gray80"),  # Corresponding to values 0,1,2,3
+    breaks = seq(-0.5, 3.5, by = 1),  # Set color break points
+    legend = F,
+    scale = "none",  # No data scaling, keep original values
+    cluster_rows = T, 
+    cluster_cols = T,
+    angle_col = "45",
+    display_numbers = T,
+    number_format = "%.0f",
+    main = paste0(cell_type, " Hub Genes and Key Pathways Pheatmap"),
+    filename = paste0("./Results/4 enrichment/", cell_type, " Hub Genes and Key Pathways Pheatmap.png"),
+    width = 10,
+    height = 6
+  )
+}
+
+### Record results
+for (cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["gene_and_pathway_matrix"]] = gene_and_pathway_matrix[[cell_type]]
+  key_gene_analysis[[cell_type]][["genes_and_pathway_pheatmap"]] = gene_and_pathway_pheatmaps[[cell_type]]
+}
+base::saveRDS(gene_and_pathway_matrix, file = "./Results/3 network new/gene_and_pathway_matrix.rds")
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "hub_genes", # hub genes
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers", # Markers for each cell type
+  "enrich", # Enrichment analysis results
+  "dotplots", # Enrichment analysis pathway bubble plots
+  "gene_and_pathway_matrix", # Gene-pathway association matrix heatmap
+  "gene_and_pathway_pheatmaps" # Gene-pathway heatmap
+)))
+
+
+########## 5.8 Heatmap Heatplot for regulon-pathway ##########
+# Construct regulation-pathway relationship matrix
+regulon_and_pathway_matrix = list()
+for (cell_type in cell_types) {
+  # cell_type = cell_types[1]
+  regulon_and_pathway_matrix[[cell_type]] = list()
+  
+  regulons = rownames(key_gene_analysis[[cell_type]][["centrality"]][["key_edges"]])
+  pathways = rownames(key_gene_analysis[[cell_type]][["enrich"]])
+  
+  # All regulation edges and pathways
+  regulon_and_pathway_matrix[[cell_type]][["all"]] <- data.frame(matrix(
+    0, nrow = length(regulons), ncol = length(pathways), dimnames = list(regulons, pathways)
+  ))
+  for (pathway in pathways) {
+    # pathway = pathways[1]
+    genes_in_pathway = key_gene_analysis[[cell_type]][["enrich"]][pathway, "geneID"]
+    genes_in_pathway <- unlist(strsplit(genes_in_pathway, "/"))
+    
+    for (regulon in regulons) {
+      # regulon = regulons[1]
+      genes_in_regulon = unlist(strsplit(regulon, "→"))
+      if (all(genes_in_regulon %in% genes_in_pathway)) {
+        regulon_and_pathway_matrix[[cell_type]][["all"]][regulon, pathway] = 
+          key_gene_analysis[[cell_type]][["enrich"]][pathway, "importance_level"]
+      }
+    }
+  }
+  
+  # Regulation edges with importance scores greater than their 70% quantile and pathways with importance levels 1, 2, 3
+  df_key = regulon_and_pathway_matrix[[cell_type]][["all"]]
+  key_gene_analysis[[cell_type]][["centrality"]][["key_edges"]][, "edge"] = 
+    rownames(key_gene_analysis[[cell_type]][["centrality"]][["key_edges"]])
+  regulons_key = with(key_gene_analysis[[cell_type]][["centrality"]][["key_edges"]], 
+                      edge[importance_score > quantile(importance_score, 0.7)])
+  pathways_key = rownames(subset(
+    key_gene_analysis[[cell_type]][["enrich"]], importance_level %in% c(1, 2, 3)
+  ))
+  pathways_key = gsub("-", "_", gsub(":", ".", pathways_key))
+  df_key = df_key[regulons_key, pathways_key]
+  df_key <- df_key[rowSums(df_key != 0) > 0, colSums(df_key != 0) > 0]
+  rownames(df_key) <- gsub("[→/]", " to ", rownames(df_key))
+  regulon_and_pathway_matrix[[cell_type]][["key"]] = df_key
+}
+
+regulon_and_pathway_pheatmaps = list()
+for (cell_type in cell_types) {
+  data_numeric <- as.matrix(regulon_and_pathway_matrix[[cell_type]][["key"]])
+  mode(data_numeric) <- "numeric" 
+  regulon_and_pathway_pheatmaps[[cell_type]] = pheatmap::pheatmap(
+    data_numeric, 
+    color = c("white", "gray20", "gray50", "gray80"),  # Corresponding to values 0,1,2,3
+    breaks = seq(-0.5, 3.5, by = 1),  # Set color break points
+    legend = F,
+    scale = "none",  # No data scaling, keep original values
+    cluster_rows = T, 
+    cluster_cols = T,
+    angle_col = "45",
+    display_numbers = T,
+    number_format = "%.0f",
+    main = paste0(cell_type, " Hub Regulons and Key Pathways Pheatmap"),
+    filename = paste0("./Results/4 enrichment/", cell_type, " Hub Regulons and Key Pathways Pheatmap.png"),
+    width = 6,
+    height = 4
+  )
+}
+
+### Record results
+for (cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["regulon_and_pathway_matrix"]] = regulon_and_pathway_matrix[[cell_type]]
+  key_gene_analysis[[cell_type]][["regulon_and_pathway_pheatmap"]] = regulon_and_pathway_pheatmaps[[cell_type]]
+}
+base::saveRDS(regulon_and_pathway_matrix, file = "./Results/3 network new/regulon_and_pathway_matrix.rds")
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "hub_genes", # hub genes
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers", # Markers for each cell type
+  "enrich", # Enrichment analysis results
+  "dotplots", # Enrichment analysis pathway bubble plots
+  "gene_and_pathway_matrix", # Gene-pathway association matrix heatmap
+  "gene_and_pathway_pheatmaps", # Gene-pathway heatmap
+  "regulon_and_pathway_matrix", # Regulation edge-pathway association matrix heatmap
+  "regulon_and_pathway_pheatmaps" # Regulation edge-pathway heatmap
+)))
+
+
+########## 5.9 Information for all pathways containing a specific gene ##########
+gene_and_pathway_detail = list()
+for (cell_type in cell_types) {
+  # cell_type = "CD14 Mono"
+  gene_and_pathway_detail[[cell_type]] = list()
+  
+  gene_and_pathway_matrix1 = key_gene_analysis[[cell_type]][["gene_and_pathway_matrix"]][["key"]]
+  for (gene in rownames(gene_and_pathway_matrix1)) {
+    # gene = rownames(gene_and_pathway_matrix1)[1]
+    pathways_have_gene <- colnames(gene_and_pathway_matrix1)[gene_and_pathway_matrix1[gene, ] != 0]
+    gene_and_pathway_detail[[cell_type]][[gene]] = key_gene_analysis[[cell_type]][["enrich"]][pathways_have_gene, c("Description", "geneID", "importance_level")]
+  }
+} ;rm(gene_and_pathway_matrix1)
+
+for (cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["gene_and_pathway_detail"]] = gene_and_pathway_detail[[cell_type]]
+}
+
+base::saveRDS(gene_and_pathway_detail, file = "./Results/3 network new/gene_and_pathway_detail.rds")
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "hub_genes", # hub genes
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers", # Markers for each cell type
+  "enrich", # Enrichment analysis results
+  "dotplots", # Enrichment analysis pathway bubble plots
+  "gene_and_pathway_matrix", # Gene-pathway association matrix heatmap
+  "gene_and_pathway_pheatmaps", # Gene-pathway heatmap
+  "regulon_and_pathway_matrix", # Regulation edge-pathway association matrix heatmap
+  "regulon_and_pathway_pheatmaps", # Regulation edge-pathway heatmap
+  "gene_and_pathway_detail"
+)))
+
+
+########## 5.10 Information for all pathways containing a specific edge ##########
+regulon_and_pathway_detail = list()
+for (cell_type in cell_types) {
+  # cell_type = "CD14 Mono"
+  regulon_and_pathway_detail[[cell_type]] = list()
+  
+  regulon_and_pathway_matrix1 = key_gene_analysis[[cell_type]][["regulon_and_pathway_matrix"]][["key"]]
+  for (regulon in rownames(regulon_and_pathway_matrix1)) {
+    # regulon = rownames(regulon_and_pathway_matrix1)[1]
+    pathways_have_regulon <- colnames(regulon_and_pathway_matrix1)[regulon_and_pathway_matrix1[regulon, ] != 0]
+    regulon_and_pathway_detail[[cell_type]][[regulon]] = key_gene_analysis[[cell_type]][["enrich"]][pathways_have_regulon, c("Description", "geneID", "importance_level")]
+  }
+} ;rm(regulon_and_pathway_matrix1)
+
+for (cell_type in cell_types) {
+  key_gene_analysis[[cell_type]][["regulon_and_pathway_detail"]] = regulon_and_pathway_detail[[cell_type]]
+}
+
+base::saveRDS(regulon_and_pathway_detail, file = "./Results/3 network new/gene_and_pathway_detail.rds")
+base::saveRDS(key_gene_analysis, file = "./Results/3 network new/key_gene_analysis.rds")
+
+rm(list = setdiff(ls(), c(
+  "cell_types", # Cell types analyzed
+  "cell_types_all",
+  "branches", # Branch division of analyzed cell types
+  "hub_genes", # hub genes
+  "key_gene_analysis", # Important results summary
+  "key_information", # GRN hub analysis
+  "result_LR_filtered", # GRN cell interaction analysis
+  "markers_state", # Markers for each cell state
+  "state_anno", # Annotation for each cell state
+  "cell_type_markers", # Markers for each cell type
+  "enrich", # Enrichment analysis results
+  "dotplots", # Enrichment analysis pathway bubble plots
+  "gene_and_pathway_matrix", # Gene-pathway association matrix heatmap
+  "gene_and_pathway_pheatmaps", # Gene-pathway heatmap
+  "regulon_and_pathway_matrix", # Regulation edge-pathway association matrix heatmap
+  "regulon_and_pathway_pheatmaps", # Regulation edge-pathway heatmap
+  "gene_and_pathway_detail",
+  "regulon_and_pathway_detail"
+)))
+
+
+
+############### 6 Draw Network Diagram ###############
+# TFG purple, circular, TG dark blue, square,
+# Node size and transparency proportional to comprehensive importance, dark gray
+# Edge thickness and transparency proportional to comprehensive importance, color divided by importance level
+# Edges with insignificant changes (less than 10%), dark gray
+
+for (cell_type in cell_types) {
+  ########## 6.1 Extract adjacency matrix (transcription factors as rows, target genes as columns) ##########
+  # Define names of some transcription factors and target genes
+  # cell_type = "CD14 Mono"
+  
+  Key_Genes = rownames(key_gene_analysis[[cell_type]][["gene_and_pathway_matrix"]][["key"]])
+  Key_TFs_in_Genes = Key_Genes[paste0("TF_", Key_Genes) %in% rownames(key_gene_analysis[[cell_type]][["summary"]])]
+  Key_TGs_in_Genes = Key_Genes[paste0("TG_", Key_Genes) %in% rownames(key_gene_analysis[[cell_type]][["summary"]])]
+  
+  Key_Edges = rownames(key_gene_analysis[[cell_type]][["regulon_and_pathway_matrix"]][["key"]])
+  Key_TFs_in_Edges <- unique(sub(" to .*", "", Key_Edges))
+  Key_TGs_in_Edges <- unique(sub(".* to ", "", Key_Edges))
+  
+  Key_TFs = unique(c(Key_TFs_in_Genes, Key_TFs_in_Edges))
+  Key_TGs = unique(c(Key_TGs_in_Genes, Key_TGs_in_Edges))
+  
+  # Create a matrix with transcription factors as row names and target genes as column names, initialized with 0
+  adj_matrix = t(key_gene_analysis[[cell_type]][["centrality"]][["pGRN"]][["network"]][Key_TGs, Key_TFs])
+  adj_matrix <- adj_matrix[rowSums(adj_matrix) != 0, colSums(adj_matrix) != 0]
+  
+  
+  ########## 6.2 Convert adjacency matrix to igraph graph object ##########
+  net <- graph_from_biadjacency_matrix(adj_matrix, directed = TRUE, weighted = TRUE, 
+                                       mode = "out", add.names = NULL)
+  
+  
+  ########## 6.3 Set vertex (Node) attributes for easy distinction between transcription factors and target genes during visualization ##########
+  # Create two groups for transcription factors (TF)
+  # Key_TFs_in_Genes = setdiff(Key_TFs, Key_TFs_in_Edges)
+  tfg_groups <- setNames(ifelse(Key_TFs %in% Key_TFs_in_Genes, "Key_TFs_in_Genes", "Key_TFs_in_Edges"), Key_TFs)
+  
+  # Create two groups for target genes (Gene)
+  # Key_TGs_in_Genes = setdiff(Key_TGs, Key_TGs_in_Edges)
+  tg_groups <- setNames(ifelse(Key_TGs %in% Key_TGs_in_Genes, "Key_TGs_in_Genes", "Key_TGs_in_Edges"), Key_TGs)
+  
+  # Set node grouping attributes
+  V(net)$group <- ifelse(!V(net)$type,  # Transcription factor nodes (type = FALSE)
+                         tfg_groups[V(net)$name], 
+                         tg_groups[V(net)$name])
+  
+  # Set node colors - assign different colors to different groups
+  tfg_colors <- c("Key_TFs_in_Edges" = "gray50", "Key_TFs_in_Genes" = "darkgreen")
+  tg_colors <- c("Key_TGs_in_Edges" = "gray50", "Key_TGs_in_Genes" = "darkblue")
+  V(net)$color <- ifelse(!V(net)$type, 
+                         tfg_colors[V(net)$group],
+                         tg_colors[V(net)$group])
+  
+  # Set node shapes
+  V(net)$shape <- ifelse(V(net)$type, "square", "circle")
+  
+  # Calculate node degree (sum of edge weights)
+  node_degree <- strength(net, mode = "all", weights = E(net)$weight)
+  
+  # Normalize node degree (divide by maximum degree value)
+  normalized_degree <- (node_degree + 1) / (max(node_degree) + 1)
+  
+  # Set node size
+  V(net)$size <- 0.2000 + normalized_degree * 10.000
+  
+  # Set node transparency
+  V(net)$alpha <- (1 - normalized_degree) * 0.5000 + 0.2500
+  
+  # Set labels as node names
+  V(net)$label <- V(net)$name
+  
+  
+  ########## 6.4 Set edge attributes ##########
+  # Edge transparency mapping weight: higher values = lower transparency (more opaque), lower values = higher transparency (more transparent)
+  E(net)$alpha <- E(net)$weight ^ 2
+  
+  # Edge width mapping weight: higher values = thicker edges, lower values = thinner edges
+  E(net)$width <- E(net)$weight ^ 2
+  
+  # Divide edges into 6 sets: common edges/exclusive edges + increased/unchanged/decreased
+  edge_groups = as.data.frame(as_edgelist(net, names = TRUE))
+  # edge_groups[, 3:5] = 0
+  for (i in 1:nrow(edge_groups)) {
+    if(paste0(edge_groups[i, 1], " to ", edge_groups[i, 2]) %in% Key_Edges) {
+      edge_groups[i, 3] = "Key_Edges"
+    } else {
+      edge_groups[i, 3] = "Ordinary_Edges"
+    }
+  }
+  E(net)$edge_group = edge_groups[, 3]
+  E(net)$edge_group <- factor(E(net)$edge_group, levels = c("Key_Edges", "Ordinary_Edges"))
+  
+  
+  ########## 6.5 Draw static network diagram ##########
+  net_plot = ggraph(net, circular = F, layout = "sugiyama") + # kk', "stress",
+    
+    # Draw edges, add arrows to clearly indicate direction, set color and line type according to grouping
+    geom_edge_link(aes(alpha = alpha, edge_width = width, color = edge_group, linetype = edge_group), 
+                   arrow = arrow(angle = 10, type = 'closed', length = unit(4.5, "mm"), ends = "last"), show.legend = FALSE) +
+    
+    # Draw nodes, set color according to grouping, size and transparency according to degree
+    geom_node_point(aes(color = color, shape = shape, size = size, alpha = alpha), show.legend = FALSE) +
+    
+    # Add node labels
+    geom_node_text(aes(label = label), check_overlap = TRUE, repel = TRUE, size = 3, max.overlaps = Inf, 
+                   color = "darkorange", fontface = "bold") +
+    
+    # Set theme
+    theme_void() +
+    
+    # Set color and shape scales
+    scale_colour_identity() +
+    scale_shape_identity() +
+    scale_size_identity() +
+    
+    # Set node transparency scale
+    scale_alpha_continuous(range = c(1, 0.1)) +
+    
+    # Set edge transparency scale
+    scale_edge_alpha_continuous(range = c(1, 0.1)) +
+    
+    # Set edge width scale
+    scale_edge_width_continuous(range = c(1, 0.1)) +
+    
+    # Set edge color scale
+    scale_edge_color_manual(values = c("Key_Edges" = "darkred", 
+                                       "Ordinary_Edges" = "gray50"),
+                            name = "Edge Group") +
+    
+    # Set edge line type scale
+    scale_edge_linetype_manual(values = c("Key_Edges" = "solid",
+                                          "Ordinary_Edges" = "solid"),
+                               name = "Edge Group") +
+    
+    # Add legend to explain grouping information
+    labs(title = paste0(cell_type, " Key pGRN"))
+  
+  print(net_plot)
+  key_gene_analysis[[cell_type]][["key_pGRN"]] = net_plot
+  ggsave(paste0("./Results/3 network new/", cell_type, " Key pGRN.png"),
+         plot = net_plot, limitsize = FALSE,
+         width = 8, height = 3, dpi = 600)
+}
+
+key_info[[GRN_type]][["net_plot"]] = net_plot
+
+
+
+############### 7 Save results as xslx ###############
+library(openxlsx)
+
+# Save summary
+Key_Gene_Analysis = list()
+for (cell_type in cell_types) {
+  X = key_gene_analysis[[cell_type]][["summary"]]
+  Key_Gene_Analysis[[cell_type]] = cbind(type_gene = rownames(X), X)
+}
+write.xlsx(Key_Gene_Analysis, file = "./Results/3 network new/Key_Gene_Analysis.xlsx", rowNames = FALSE)
+
+# Save centrality key_edges
+Key_Edge_Centrality = list()
+for (cell_type in cell_types) {
+  X = key_gene_analysis[[cell_type]][["centrality"]][["key_edges"]]
+  X <- X[, -ncol(X)]
+  Key_Edge_Centrality[[cell_type]] = cbind(edge = rownames(X), X)
+}
+write.xlsx(Key_Edge_Centrality, file = "./Results/3 network new/Key_Edge_Centrality.xlsx", rowNames = FALSE)
+
+# Save cell_communication
+Key_Gene_Cell_Communication = list()
+for (cell_type in cell_types) {
+  Key_Gene_Cell_Communication[[cell_type]] = key_gene_analysis[[cell_type]][["cell_communication"]]
+}
+write.xlsx(Key_Gene_Cell_Communication, file = "./Results/3 network new/Key_Gene_Cell_Communication.xlsx", rowNames = FALSE)
+
+# Save state_annotaion
+Cell_State_in_Cell_Branch_Annotaion = list()
+for (cell_type in cell_types) {
+  X = key_gene_analysis[[cell_type]][["state_annotaion"]][["result"]]
+  Cell_State_in_Cell_Branch_Annotaion[[cell_type]] <- cbind(state = rownames(X), X)
+}
+write.xlsx(Cell_State_in_Cell_Branch_Annotaion, file = "./Results/3 network new/Cell_State_in_Cell_Branch_Annotaion.xlsx", rowNames = FALSE)
+
+# Save enrich
+Enrichment_Alalysis = list()
+for (cell_type in cell_types) {
+  X = key_gene_analysis[[cell_type]][["enrich"]]
+  Enrichment_Alalysis[[cell_type]] = cbind(pathway = rownames(X), X)
+}
+write.xlsx(Enrichment_Alalysis, file = "./Results/3 network new/Enrichment_Alalysis.xlsx", rowNames = FALSE)
+
+# Save gene_and_pathway_matrix key
+key_gene_and_key_pathway_matrix = list()
+for (cell_type in cell_types) {
+  X = key_gene_analysis[[cell_type]][["gene_and_pathway_matrix"]][["key"]]
+  key_gene_and_key_pathway_matrix[[cell_type]] = cbind(row_key_col_pathway = rownames(X), X)
+}
+write.xlsx(key_gene_and_key_pathway_matrix, file = "./Results/3 network new/key_gene_and_key_pathway_matrix.xlsx", rowNames = FALSE)
