@@ -56,7 +56,7 @@ The final output of `scDEDS` is a comprehensive list object (`interest_cell_type
 The model training process is **extremely computationally intensive**.
 *   **OS:** Linux is highly recommended. Windows users can use WSL2.
 *   **CPU:** A high-core-count CPU (e.g., >= 40 cores) is strongly advised.
-*   **RAM:** A big RAM is highly recommended (e.g. for data with 1000 cells and 20,000 genes, >= 64 GB is recommended, and more is of course better).
+*   **RAM:** A big RAM is highly recommended (e.g. for data with 1,000 cells and 20,000 genes, >= 64 GB is recommended, and more is of course better).
 *   **Time:** Training for one cell type may take **several days** (e.g., ~11 days for CD14 Mono in the paper on a powerful server with 200 GB RAM in WSL2).
 
 ## Specific Guidelines (Code, Data, and Results Availability)
