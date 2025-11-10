@@ -61,7 +61,7 @@ The model training process is **extremely computationally intensive**.
 
 ## R Package
 
-*   R package is in https://github.com/hth-buaa/scDEDS/edit/main/README.md.
+*   R package is in https://github.com/hth-buaa/scDEDS.
 
 ## Specific Guidelines (Code, Data, and Results Availability)
 
