@@ -1,0 +1,704 @@
+# A Guide to Constructing GRNs Using scDEDS with Paired scRNA-seq and scATAC-seq Data
+
+# Use R v4.4
+
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list = ls())
+
+install.packages("https://cran.r-project.org/src/contrib/Archive/igraph/igraph_2.0.3.tar.gz", repos = NULL, type = "source")
+install.packages(c("dplyr", "ggplot2", "Signac", "SeuratObjet", "Seurat", 
+                 "VGAM", "ggrepel", "minpack.lm", "data.table", "tibble", 
+                 "tidyr", "pROC", "DDRTree", "GA", "psych"))
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("GenomeInfoDb", "TFBSTools", "JASPAR2024", "IRanges", 
+                     "ChIPseeker", "EnsDb.Hsapiens.v86", "Biobase", 
+                     "BiocGenerics", "monocle", "Biostrings"))
+BiocManager::install("TxDb.Hsapiens.UCSC.hg38.knownGene")
+# BiocManager::install("TxDb.Hsapiens.UCSC.hg19.knownGene")
+BiocManager::install("BSgenome.Hsapiens.UCSC.hg38")
+# BiocManager::install("BSgenome.Hsapiens.UCSC.hg19")
+devtools::install_github("hth-buaa/scDEDS")
+
+library(scDEDS)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+# library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(dplyr)
+library(DDRTree)
+library(BSgenome.Hsapiens.UCSC.hg38)
+# library(BSgenome.Hsapiens.UCSC.hg19)
+
+set.seed(123)
+Working_directory = "/mnt/d/pbmc-equation" # In WSL2.
+# Working_directory = "D:/pbmc-equation" # In Windows.
+# Working_directory = "/home/pbmc-equation" # In Linux.
+base::setwd(Working_directory)
+
+
+
+########## Part 0: Loading Data ##########
+SeuratData::InstallData("pbmcMultiome")
+scRNAseq = SeuratData::LoadData("pbmcMultiome", "pbmc.rna")
+scATACseq = SeuratData::LoadData("pbmcMultiome", "pbmc.atac")
+base::saveRDS(scRNAseq, file = "./scRNAseq.rds")
+base::saveRDS(scATACseq, file = "./scATACseq.rds")
+
+
+
+########## Part 1: Data Preprocessing ##########
+# scRNAseq = base::readRDS("./scRNAseq.rds")
+# scATACseq = base::readRDS("./scATACseq.rds")
+rm(list = base::setdiff(ls(), c("scATACseq", "scRNAseq", "Working_directory")))
+
+
+##### 1.1 Annotating Chromatin Fragments and Identifying TGs ##### 
+base::setwd(Working_directory)
+promoter_range = 50 # Set the promoter range according to your research needs (unit: b)
+results_identify_TGs = identify_TGs(
+  genome_for_anno = TxDb.Hsapiens.UCSC.hg38.knownGene, 
+  promoter_range = promoter_range, 
+  scRNAseq = scRNAseq, 
+  scATACseq = scATACseq, 
+  annoDb = "org.Hs.eg.db"
+)
+base::saveRDS(results_identify_TGs, file = "./1.1 Data Preprocessing - Identify TGs By Annotation/results_identify_TGs.rds")
+
+
+##### 1.2 Identifying TFGs #####
+base::setwd(Working_directory)
+TFs_in_JASPAR2024 = get_TGs_from_JASPAR2024(
+  scRNAseq = scRNAseq, 
+  species = "Homo sapiens", 
+  collection = c("CORE", "CNE", "PHYLOFACTS", "SPLICE", "POLII", "FAM", "PBM", 
+                 "PBM_HOMEO", "PBM_HLH", "UNVALIDATED")
+)
+base::saveRDS(TFs_in_JASPAR2024, file = "./1.2 Data Preprocessing - Get TGs From JASPAR2024/TFs_in_JASPAR2024.rds")
+base::save.image("./1.2 Data Preprocessing - Get TGs From JASPAR2024/code1.2.RData")
+
+
+##### 1.3 Generating Counts Matrices for TGs/TFs Expression and TGs Activity (Seurat Object) ##### 
+base::setwd(Working_directory)
+Basic_Info = get_expression_and_activity_matrix(
+  TGs = results_identify_TGs$TGs, 
+  TFs = TFs_in_JASPAR2024, 
+  scRNAseq = scRNAseq, 
+  scATACseq = scATACseq, 
+  promoter_range = promoter_range, 
+  path = "/mnt/d/pbmc-equation/pbmc_granulocyte_sorted_10k_atac_fragments.tsv.gz" # Absolute path to the fragment tbi. file (both .tsv.gz and .tbi index must exist in the same directory).
+)
+base::saveRDS(Basic_Info, file = "./1.3 Data Preprocessing - Get Expression And Activity Matrix/Basic_Info.rds")
+base::save.image("./1.3 Data Preprocessing - Get Expression And Activity Matrix/code1.3.RData")
+
+
+########## Part 2: Inferring Pseudotime, Branching, and Grouping Cells ##########
+##### 2.1 Pseudotime Analysis and Cell Branch Partitioning #####
+##### 2.1.1 Selecting Cell Types of Interest with Relevant Data
+### Viewing Cell Labels
+table(Basic_Info[["scRNAseq_for_GRN"]]@meta.data$seurat_annotations)
+# CD14 Mono    CD16 Mono    CD4 Naive    CD4 TCM    CD4 TEM    CD8 Naive    CD8 TEM_1    CD8 TEM_2    HSPC    Intermediate B    MAIT 
+# 2812         514          1419         1149       298        1410         325          358          26      353               137 
+# Memory B    NK    Naive B    Plasma    Treg    cDC    filtered    gdT    pDC 
+# 371         468   142        18        162     198    1497        146    106 
+cell_labels = base::unique(Basic_Info[["scRNAseq_for_GRN"]]@meta.data$seurat_annotations)
+cell_labels_num = table(Basic_Info[["scRNAseq_for_GRN"]]@meta.data$seurat_annotations)
+
+### Obtaining cell types of interest (with cell count greater than 800 or other)
+interest_cell_type = base::names(cell_labels_num)[cell_labels_num > 800]
+interest_cell_type = interest_cell_type[interest_cell_type != "filtered"]
+# interest_cell_type = "CD14 Mono" # 2812 cells
+# interest_cell_type = "CD4 Naive" # 1419 cells
+# interest_cell_type = "CD4 TCM" # 1149 cells
+# interest_cell_type = "CD8 Naive" # 1410 cells
+print(interest_cell_type)
+# [1] "CD14 Mono" "CD4 Naive" "CD4 TCM"   "CD8 Naive"
+
+### Retrieving Relevant Data for Cell Types of Interest
+base::setwd(Working_directory)
+ncores = parallel::detectCores() - 1 # In Linux.
+# ncores = 1 # In windows.
+interest_cell_type_data = get_interest_cell_type_data(
+  interest_cell_type = interest_cell_type, 
+  Basic_Info = Basic_Info, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_data, file = "./2.1 Data Processing - Pseudotime Analysis And Cell Branching Assignment/interest_cell_type_data.rds")
+
+
+##### 2.1.2 Performing Pseudotemporal Ordering and Branching Analysis of Cell Types of Interest Based on Transcriptomic Data
+base::setwd(Working_directory)
+interest_cell_type_Branches = order_pseudotime_and_divide_branches(interest_cell_type_data)
+# CD14 Mono 1→2 1→3, 
+# CD4 Naive 1→5 1→2→3 1→2→4, 
+# CD4 TCM 1→11 1→2→10 1→2→3→9 1→2→3→4→8 1→2→3→4→5→6 1→2→3→4→5→7, 
+# CD8 Naive 1→9 1→2→3→4 1→2→3→5 1→2→6→7 1→2→6→8
+base::saveRDS(interest_cell_type_Branches, file = "./2.1 Data Processing - Pseudotime Analysis And Cell Branching Assignment/interest_cell_type_Branches.rds")
+base::save.image("./2.1 Data Processing - Pseudotime Analysis And Cell Branching Assignment/code2.1.RData")
+
+
+##### 2.2 Cell Grouping and Group-Wise Information Specification #####
+##### 2.2.1 Retrieving Pseudotemporal Expression/Activity Vectors (TFE_t, TGA_t, TGE_t) for Each Gene Based on the Pseudotime Value of Individual Cells
+base::setwd(Working_directory)
+alpha_gene = 0.7 # Manually set a gene filtering threshold to retain genes with a missing value rate below this threshold.
+alpha_cell = 0.9 # Manually set a cell filtering threshold to retain cells with a missing value rate below this threshold.
+interest_cell_type_genes_pseudotime_info = get_genes_pseudotime_info(
+  interest_cell_type_Branches = interest_cell_type_Branches, 
+  interest_cell_type_data = interest_cell_type_data, 
+  alpha_gene = alpha_gene, 
+  alpha_cell = alpha_cell, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_genes_pseudotime_info, file = "./2.2 Data Processing - Cell Grouping/interest_cell_type_genes_pseudotime_info.rds")
+rm(interest_cell_type_Branches)
+
+##### 2.2.2 Grouping Cells Based on Pseudotime Values and Counts of Valid (Non-Zero) Expression and Activity Values to Calculate TFE_T, TGA_T, and TGE_T per Group
+base::setwd(Working_directory)
+
+# Manually designate three points in the first quadrant, where the x-axis represents the total number of cells and the y-axis represents the minimum number of cells per group.
+# Use the method of undetermined coefficients to determine the parameters of the function y = c * ln(ax + b), fitting the relationship between the total number of cells and the minimum number of cells per group.
+points_x_for_fitting_nc_and_nmin = c(200, 500, 1000) # A numeric vector of length 3 requiring all positive integers in strictly increasing order.
+points_y_for_fitting_nc_and_nmin = c(5, 10, 15) # A numeric vector of length 3 requiring all positive integers in strictly increasing order. 
+# If points_y_for_fitting_nc_and_nminforms an arithmetic sequence, it is recommended that twice the median value of points_x_for_fitting_nc_and_nmin is less than the sum of its first and last values.
+interest_cell_type_group = cell_grouping(
+  interest_cell_type_genes_pseudotime_info = interest_cell_type_genes_pseudotime_info, 
+  points_x_for_fitting_nc_and_nmin = points_x_for_fitting_nc_and_nmin, 
+  points_y_for_fitting_nc_and_nmin = points_y_for_fitting_nc_and_nmin, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_group, file = "./2.2 Data Processing - Cell Grouping/interest_cell_type_group.rds")
+base::save.image("./2.2 Data Processing - Cell Grouping/code2.2.RData")
+
+
+
+########## Part 3: Constructing Standard GRNs from TFBS PWMs ##########
+### Construction of a Standard GRN for Comprehensive TG-TF Pairs Based on Base PWM of TF Binding Sites
+base::setwd(Working_directory)
+min_score_for_matchPWM = "80%" # Manually set the minimum score threshold (a percentage string between 0 and 1) for PWM matching TFG.
+interest_cell_type_sGRN_all_TGTF_pairs = get_sGRN_by_TFBS_pwm_by_JASPAR2024(
+  interest_cell_type_data = interest_cell_type_data, 
+  promoter_range = promoter_range, 
+  results_identify_TGs = results_identify_TGs, 
+  genome = BSgenome.Hsapiens.UCSC.hg38, 
+  min_score_for_matchPWM = min_score_for_matchPWM, 
+  species = "Homo sapiens", 
+  collection = c("CORE", "CNE", "PHYLOFACTS", "SPLICE", "POLII", "FAM", "PBM", "PBM_HOMEO", "PBM_HLH", "UNVALIDATED"), 
+  output_predicted_TFBS = FALSE, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_sGRN_all_TGTF_pairs, file = "./3 get sGRN/interest_cell_type_sGRN_all_TGTF_pairs.rds")
+
+### Setingt the Regulatory Threshold Tao (In the GRN, TG-TF pairs exceeding this threshold are considered to have a regulatory relationship; otherwise, they are considered to have no regulatory relationship)
+interest_cell_type_tao = rep(999, base::length(interest_cell_type_sGRN_all_TGTF_pairs))
+base::names(interest_cell_type_tao) = base::names(interest_cell_type_sGRN_all_TGTF_pairs)
+for (cell_type in base::names(interest_cell_type_sGRN_all_TGTF_pairs)) {
+  interest_cell_type_tao[cell_type] = base::max(
+    base::min(interest_cell_type_sGRN_all_TGTF_pairs[[cell_type]][interest_cell_type_sGRN_all_TGTF_pairs[[cell_type]] > 0], na.rm = TRUE) - 0.005, 
+    0.005
+  )
+}
+base::saveRDS(interest_cell_type_tao, file = "./3 get sGRN/interest_cell_type_tao.rds")
+
+### Constructing the sGRN for Each Branch
+base::setwd(Working_directory)
+interest_cell_type_branch_sGRN = get_branch_sGRN(
+  interest_cell_type_sGRN_all_TGTF_pairs = interest_cell_type_sGRN_all_TGTF_pairs, 
+  interest_cell_type_group = interest_cell_type_group, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_branch_sGRN, file = "./3 get sGRN/interest_cell_type_branch_sGRN.rds")
+
+### Constructing the sGRN for Cell Classes Based on the sGRN of Each Branch
+base::setwd(Working_directory)
+interest_cell_type_sGRN = get_sGRN(
+  interest_cell_type_sGRN_all_TGTF_pairs = interest_cell_type_sGRN_all_TGTF_pairs, 
+  interest_cell_type_branch_sGRN = interest_cell_type_branch_sGRN
+)
+base::saveRDS(interest_cell_type_sGRN, file = "./3 get sGRN/interest_cell_type_sGRN.rds")
+base::save.image("./3 get sGRN/code3.RData")
+
+
+
+########## Part 4: Developing DEDS-Based GRN Regression Predictive Models for Each Branch ##########
+##### 4.1 Partitioning Training, Validation, and Test Sets #####
+base::setwd(Working_directory)
+prop = c(0.7, 0.15)
+set_seed = 123 # Reproducible
+# set_seed = stats::runif(1) # Not Reproducible
+interest_cell_type_branch_dataset_spilt = spilt_dataset(
+  interest_cell_type_branch_sGRN = interest_cell_type_branch_sGRN, 
+  prop = prop, 
+  set_seed = set_seed, 
+  interest_cell_type_group = interest_cell_type_group, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_branch_dataset_spilt, file = "./4.1 Build Prediction Model - Split Dataset Into Training, Validation, Test Set/interest_cell_type_branch_dataset_spilt.rds")
+base::save.image("./4.1 Build Prediction Model - Split Dataset Into Training, Validation, Test Set/code4.1.RData")
+
+
+##### 4.2 Model Training and Evaluation for Each Branch #####
+##### 4.2.1 Setting Initial Values, Lower Bounds, and Upper Bounds for Parameters
+### Setting Initial Parameter Values
+base::setwd(Working_directory)
+interest_cell_type_branch_init_params = set_init_params(
+  interest_cell_type_branch_dataset_spilt = interest_cell_type_branch_dataset_spilt, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_branch_init_params, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_init_params.rds")
+
+### Setting Lower Bounds for Parameters
+base::setwd(Working_directory)
+interest_cell_type_branch_init_params_lower = set_init_params_lower(
+  interest_cell_type_branch_dataset_spilt = interest_cell_type_branch_dataset_spilt, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_branch_init_params_lower, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_init_params_lower.rds")
+
+### Setting Upper Bounds for Parameters
+interest_cell_type_branch_init_params_upper = set_init_params_upper(
+  interest_cell_type_branch_dataset_spilt = interest_cell_type_branch_dataset_spilt, 
+  ncores = ncores
+)
+base::saveRDS(interest_cell_type_branch_init_params_upper, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_init_params_upper.rds")
+
+
+##### 4.2.2 模型训练的训练与评估（每分支）【不封装为函数】
+base::setwd(Working_directory)
+
+### Setting Model Hyperparameters
+max_epochs = 100 # Manually set maximum training epochs.
+early_stop = 4 # Manually set early stopping epochs.
+popSize_ga = 20 # Manually set the population size for each genetic algorithm training session.
+maxiter_ga = 30 # Manually set the number of generations for the genetic algorithm per iteration round.
+parallel_ga = TRUE # Manually set whether to enable parallel computation for the genetic algorithm: use TRUE to enable, FALSE to disable.
+seed_ga = 123 # Manually set the genetic algorithm seed. It is recommended to use a constant value to ensure reproducible results or to resume code execution from the previous state after a program crash.
+iterations_grad = 3 # Manually set the number of gradient descent steps per iteration round.
+# It is strongly recommended to run the program on a Linux server with at least 128GB of RAM and no fewer than 40 CPU cores.
+# The developer uses a Windows 11 system with 256GB of RAM and 80 CPU cores, running the program via WSL2.
+# Under the developer's server configuration and using the settings in this tutorial, the training time for CD14 Mono takes approximately 11 days, CD4 Naive takes about 1 day, CD4 TCM requires around 2 days, and CD8 Naive training also takes approximately 2 days.
+
+### Training Each Branch of Every Cell Type
+interest_cell_type_branch_model_train = base::list()
+base::save.image("./4.2 BUild Prediction Model - Model Training And Evaluation/code4.2beforetest.RData")
+# load("./4.2 BUild Prediction Model - Model Training And Evaluation/code4.2beforetest.RData")
+T1 = base::Sys.time(); for (cell_type in base::names(interest_cell_type_branch_dataset_spilt)) {
+  message("Starting training the prediction models for each branch in cell type ", cell_type, ".")
+  
+  message("Initializing optimal prediction result storage.")
+  best_pred_result = interest_cell_type_branch_dataset_spilt[[cell_type]][["all"]]
+  best_pred_result["theta_p"] = 0
+  best_pred_result[base::paste0("theta_p_branch", 1:(base::length(interest_cell_type_branch_dataset_spilt[[cell_type]])-1))] = 0
+  best_pred_result$theta_s_bin = base::as.integer(best_pred_result$theta_s > 0)
+  best_pred_result["theta_p_bin"] = 0
+  best_pred_result[base::paste0("theta_p_bin_branch", 1:(base::length(interest_cell_type_branch_dataset_spilt[[cell_type]])-1))] = 0
+  
+  message("Initializing model training iteration result storage.")
+  interest_cell_type_branch_model_train[[cell_type]] = base::list()
+  
+  message("Iterating through each branch and training each branch independently.")
+  for (n in 1:(base::length(interest_cell_type_branch_dataset_spilt[[cell_type]])-1)) {
+    message("Starting training the prediction model for branch ", n, " in cell type ", cell_type, ".")
+    
+    message("Extracting initial parameter values, upper bounds, lower bounds, and names.")
+    branch_params_list = interest_cell_type_branch_init_params[[cell_type]][[n]]
+    branch_params_list_lower = interest_cell_type_branch_init_params_lower[[cell_type]][[n]]
+    branch_params_list_upper = interest_cell_type_branch_init_params_upper[[cell_type]][[n]]
+    branch_params_names = base::names(base::unlist(interest_cell_type_branch_init_params_lower[[cell_type]][[n]]))
+    
+    message("Extracting training set, training set, and test set data.")
+    train_data = base::as.matrix(base::subset(interest_cell_type_branch_dataset_spilt[[cell_type]][[n]], dataset == "training_set")[, -(1:3)])
+    validate_data = base::as.matrix(base::subset(interest_cell_type_branch_dataset_spilt[[cell_type]][[n]], dataset == "validation_set")[, -(1:3)])
+    test_data = base::as.matrix(base::subset(interest_cell_type_branch_dataset_spilt[[cell_type]][[n]], dataset == "test_set")[, -(1:3)])
+    
+    message("Extracting the pseudotime interval length for all cell groups.")
+    Tslot_K = interest_cell_type_group[[cell_type]][["Branches_Tslot_k"]][[n]]
+    
+    message("Extracting the binary classification threshold for regulatory strength.")
+    tao = interest_cell_type_tao[cell_type]
+    
+    message("Extracting the positive sample data from the training set.")
+    train_data_pos = train_data[train_data[, "theta_s"] != 0, ]
+    
+    message("Convert the parameters from list format to vector format.")
+    branch_params_vec = base::unlist(branch_params_list)
+    branch_params_vec_lower = base::unlist(branch_params_list_lower)
+    branch_params_vec_upper = base::unlist(branch_params_list_upper)
+    
+    message("Initializing the objective function value in model training.")
+    f_value_train = 1e+5 + 1
+    
+    message("Initializing the genetic algorithm population.")
+    prev_population = base::matrix(
+      data = base::rep( base::as.numeric(branch_params_vec), popSize_ga), 
+      nrow = popSize_ga, ncol = base::length(branch_params_vec), 
+      byrow = TRUE
+    )
+    
+    message("Initializing the model performance storage for each training round.")
+    model_performance = base::as.data.frame(base::matrix(
+      data = 0, 
+      nrow = 9, 
+      ncol = max_epochs, 
+      dimnames = base::list(c(
+        "kappa_train", "loss_train_threshold_lower", "loss_train_threshold_upper", 
+        "kappa_validate", "loss_validate_threshold_lower", "loss_validate_threshold_upper", 
+        "kappa_test", "loss_test_threshold_lower", "loss_test_threshold_upper"
+      ), base::seq_len(max_epochs))
+    ))
+    
+    message("Initializing the model parameters storage for each training round.")
+    para_data_frame = base::as.data.frame(base::matrix(
+      data = 0, 
+      nrow = max_epochs, 
+      ncol = base::length(branch_params_vec_lower), 
+      dimnames = base::list(1:max_epochs, branch_params_names)
+    ))
+    
+    message("Initializing the model evaluation storage for each training round.")
+    model_evaluation = base::as.data.frame(base::matrix(
+      data = 0, 
+      nrow = max_epochs * 3, 
+      ncol = 15, 
+      dimnames = base::list(
+        {
+          model_evaluation_rownames = base::character(0)
+          for (i in 1:max_epochs) {
+            model_evaluation_rownames = c(
+              model_evaluation_rownames, 
+              base::paste0("train", i), 
+              base::paste0("validate", i), 
+              base::paste0("test", i)
+            )
+          }
+          model_evaluation_rownames
+        }, 
+        c("TP", "TN", "FP", "FN", 
+          "Accuracy", "Recall", "Precision", "Specificity", "NegPredRate", 
+          "Kappa", "F1", "Prevalence", "DetectionRate", "BalancedAccuracy", "auc")
+      )
+    ))
+    
+    message("Obtaining the sGRN for the training set, validation set, and test set.")
+    standard_train_binary = base::as.numeric(base::ifelse(train_data[, "theta_s"] > 0, 1, 0))
+    standard_validate_binary = base::as.numeric(base::ifelse(validate_data[, "theta_s"] > 0, 1, 0))
+    standard_test_binary = base::as.numeric(base::ifelse(test_data[, "theta_s"] > 0, 1, 0))
+    
+    base::save.image(paste0("./4.2 BUild Prediction Model - Model Training And Evaluation/branch", n, "_", gsub(" ", "", cell_type), "_code4.2beforetest.RData"))
+    for(epoch in 1:max_epochs) {
+      message("epoch = ", epoch)
+      
+      message("Training Model.")
+      # Genetic Algorithm Training
+      if (f_value_train > 10^5.0) {pcrossover = 0.95; pmutation = 0.75} else {
+        if (f_value_train > 10^4.4) {pcrossover = 0.90; pmutation = 0.60} else {
+          if (f_value_train > 10^3.9) {pcrossover = 0.86; pmutation = 0.48} else {
+            if (f_value_train > 10^3.5) {pcrossover = 0.83; pmutation = 0.39} else {
+              if (f_value_train > 10^3.2) {pcrossover = 0.81; pmutation = 0.33} else {
+                if (f_value_train > 10^3.0) {pcrossover = 0.8; pmutation = 0.30} else {pcrossover = 0.8; pmutation = 0.30}
+              }
+            }
+          }
+        }
+      }
+      t1 = base::Sys.time()
+      result_ga = GA::ga(
+        type = "real-valued", 
+        fitness = f_train_cal, 
+        lower = branch_params_vec_lower, 
+        upper = branch_params_vec_upper, 
+        popSize = popSize_ga, 
+        pcrossover = pcrossover, 
+        pmutation = pmutation, 
+        elitism = base::ceiling(0.2 * maxiter_ga), 
+        maxiter = maxiter_ga, 
+        suggestions = prev_population, 
+        parallel = parallel_ga, 
+        seed = seed_ga
+      )
+      prev_population = base::matrix(
+        data = base::rep(base::as.numeric(result_ga@solution[1, ]), popSize_ga), 
+        nrow = popSize_ga, 
+        ncol = base::length(branch_params_vec), 
+        byrow = TRUE
+      )
+      result_ga = GA::ga(
+        type = "real-valued", 
+        fitness = f_train_cal, 
+        lower = branch_params_vec_lower, 
+        upper = branch_params_vec_upper, 
+        popSize = popSize_ga, 
+        pcrossover = pcrossover, 
+        pmutation = pmutation, 
+        elitism = base::ceiling(0.2 * maxiter_ga), 
+        maxiter = 1, 
+        suggestions = prev_population, 
+        parallel = FALSE, 
+        seed = seed_ga
+      )
+      t2 = base::Sys.time(); base::print(t2 - t1); gc()
+      f_value_train = -result_ga@fitnessValue
+      base::saveRDS(result_ga, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/result_ga.rds")
+      
+      # Gradient Descent Method Training
+      ncores_grad = base::ceiling(base::min(
+        base::max(parallel::detectCores() - 40, parallel::detectCores() / 2), 
+        base::max(parallel::detectCores() - 40, parallel::detectCores() / 2) * (f_value_train / (base::length(branch_params_vec_upper) * 2))^0.1
+      )) # Manually set the number of threads used for gradient descent per iteration round.
+      t3 = base::Sys.time(); result_gradient = gradient_ascent_train(
+        iterations = iterations_grad, 
+        alpha_lower = 1e-5, 
+        alpha_upper = 1e-3, 
+        alpha_guess = 1e-4, 
+        init_theta = base::as.numeric(result_ga@solution[1, ]), 
+        h_max = 1e-9, 
+        h_min_percent = 0.01, 
+        setseed = stats::runif(1), 
+        ncores = ncores_grad
+      ); t4 = base::Sys.time(); base::print(t4 - t3)
+      f_value_train = -result_gradient$objective_value
+      prev_population = base::matrix(
+        data = base::rep(result_gradient$parameters, popSize_ga), 
+        nrow = popSize_ga, 
+        ncol = base::length(branch_params_vec), 
+        byrow = TRUE
+      )
+      para_data_frame[epoch, ] = result_gradient$parameters
+      base::saveRDS(result_gradient, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/result_gradient.rds")
+      base::saveRDS(para_data_frame, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/para_data_frame.rds")
+      
+      # Selecting the Optimal Threshold and Kappa
+      loss_train = base::sapply(X = base::rownames(train_data), FUN = function(TG_TF) {loss_cal(TG_TF, data = train_data)})
+      loss_train_sorted = base::as.numeric(base::sort(loss_train))
+      loss_train_threshold_index = base::data.frame(
+        lower = c(0, loss_train_sorted), 
+        upper = c(loss_train_sorted, Inf), 
+        value = c(
+          base::min(loss_train) / 2, 
+          (loss_train_sorted[1:(base::length(loss_train_sorted) - 1)] + loss_train_sorted[2:base::length(loss_train_sorted)]) / 2, 
+          base::max(loss_train) + 1)
+      )
+      kappas_train = base::sapply(X = 1:base::nrow(loss_train_threshold_index), FUN = function(i) {
+        psych::cohen.kappa(base::cbind(
+          base::as.numeric(base::ifelse(loss_train <= loss_train_threshold_index[i, "value"], 1, 0)), 
+          standard_train_binary
+        ))$kappa
+      })
+      index_num_train = base::which.max(kappas_train)
+      model_performance["kappa_train", epoch] = base::max(kappas_train)
+      model_performance["loss_train_threshold_lower", epoch] = loss_train_threshold_index[index_num_train, "lower"]
+      model_performance["loss_train_threshold_upper", epoch] = loss_train_threshold_index[index_num_train, "upper"]
+      message(base::paste0(
+        "Train | kappa = ", base::round(model_performance["kappa_train", epoch], 4), 
+        " | loss_threshold_lower = ", base::round(model_performance["loss_train_threshold_lower", epoch], 6), 
+        " | loss_threshold_upper = ", base::round(model_performance["loss_train_threshold_upper", epoch], 6)
+      ))
+      prediction_train = base::as.numeric(base::ifelse(loss_train <= loss_train_threshold_index[index_num_train, "value"], 1, 0))
+      model_evaluation[base::paste0("train", epoch), ] = scDEDS::model_evaluate(prediction_train, standard_train_binary)
+      print(model_evaluation[base::paste0("train", epoch), ])
+      
+      message("Validating Model.")
+      # For each TG-TF pair in the validation set, calculate the objective function value of the validation set.
+      # Use the validation set objective function values as node-splitting threshold intervals (including 0 and Inf as boundaries). 
+      # Traverse the midpoint of each interval as a threshold: predict samples below the threshold as positive and those above as negative, then calculate kappa.
+      # Record the optimal kappa and the optimal interval.
+      loss_validate = base::sapply(X = base::rownames(validate_data), FUN = function(TG_TF) {loss_cal(TG_TF, data = validate_data)})
+      loss_validate_threshold_index_node = c(
+        model_performance["loss_train_threshold_lower", epoch], 
+        base::sort(base::as.numeric(loss_validate[
+          loss_validate > model_performance["loss_train_threshold_lower", epoch] & 
+            loss_validate < model_performance["loss_train_threshold_upper", epoch]
+        ])), 
+        model_performance["loss_train_threshold_upper", epoch]
+      )
+      loss_validate_threshold_index = base::data.frame(
+        lower = loss_validate_threshold_index_node[-base::length(loss_validate_threshold_index_node)], 
+        upper = loss_validate_threshold_index_node[-1], 
+        value = (loss_validate_threshold_index_node[-base::length(loss_validate_threshold_index_node)] + 
+                   loss_validate_threshold_index_node[-1]) / 2
+      )
+      kappas_validate = base::sapply(X = 1:(base::length(loss_validate_threshold_index_node)-1), FUN = function(i) {
+        psych::cohen.kappa(base::cbind(
+          base::as.numeric(base::ifelse(loss_validate <= loss_validate_threshold_index[i, "value"], 1, 0)), 
+          standard_validate_binary
+        ))$kappa
+      })
+      index_num_validate = base::which.max(kappas_validate)
+      model_performance["kappa_validate", epoch] = base::max(kappas_validate)
+      model_performance["loss_validate_threshold_lower", epoch] = loss_validate_threshold_index[index_num_validate, "lower"]
+      model_performance["loss_validate_threshold_upper", epoch] = loss_validate_threshold_index[index_num_validate, "upper"]
+      message(base::paste0(
+        "Validate | kappa = ", base::round(model_performance["kappa_validate", epoch], 4), 
+        " | loss_threshold_lower = ", base::round(model_performance["loss_validate_threshold_lower", epoch], 6), 
+        " | loss_threshold_upper = ", base::round(model_performance["loss_validate_threshold_upper", epoch], 6)
+      )) 
+      prediction_validate = base::as.numeric(base::ifelse(loss_validate <= loss_validate_threshold_index[index_num_validate, "value"], 1, 0))
+      model_evaluation[base::paste0("validate", epoch), ] = scDEDS::model_evaluate(prediction_validate, standard_validate_binary)
+      print(model_evaluation[base::paste0("validate", epoch), ])
+      
+      message("Testing Model.")
+      # For each TG-TF pair in the test set, calculate the objective function value of the test set.
+      # Use the validation set objective function values within the optimal interval as node-splitting criteria for the optimal threshold interval.
+      # Traverse the midpoint of each interval as a threshold: predict samples below the threshold as positive and those above as negative, then calculate kappa.
+      # Record the optimal kappa and the optimal interval.
+      loss_test = base::sapply(X = base::rownames(test_data), FUN = function(TG_TF) {loss_cal(TG_TF, data = test_data)})
+      loss_test_threshold_index_node = c(
+        model_performance["loss_train_threshold_lower", epoch], 
+        base::sort(base::as.numeric(loss_test[
+          loss_test > model_performance["loss_train_threshold_lower", epoch] & 
+            loss_test < model_performance["loss_train_threshold_upper", epoch]])), 
+        model_performance["loss_train_threshold_upper", epoch]
+      )
+      loss_test_threshold_index = base::data.frame(
+        lower = loss_test_threshold_index_node[-base::length(loss_test_threshold_index_node)], 
+        upper = loss_test_threshold_index_node[-1], 
+        value = (loss_test_threshold_index_node[-base::length(loss_test_threshold_index_node)] + loss_test_threshold_index_node[-1]) / 2
+      )
+      kappas_test = base::sapply(X = 1:(base::length(loss_test_threshold_index_node)-1), FUN = function(i) {
+        psych::cohen.kappa(base::cbind(
+          base::as.numeric(base::ifelse(loss_test <= loss_test_threshold_index[i, "value"], 1, 0)), 
+          standard_test_binary)
+        )$kappa})
+      index_num_test = base::which.max(kappas_test)
+      model_performance["kappa_test", epoch] = base::max(kappas_test)
+      model_performance["loss_test_threshold_lower", epoch] = loss_test_threshold_index[index_num_test, "lower"]
+      model_performance["loss_test_threshold_upper", epoch] = loss_test_threshold_index[index_num_test, "upper"]
+      message(base::paste0(
+        "Test | kappa = ", base::round(model_performance["kappa_test", epoch], 4), 
+        " | loss_threshold_lower = ", base::round(model_performance["loss_test_threshold_lower", epoch], 6), 
+        " | loss_threshold_upper = ", base::round(model_performance["loss_test_threshold_upper", epoch], 6)
+      )) 
+      prediction_test = base::as.numeric(base::ifelse(loss_test <= loss_test_threshold_index[index_num_test, "value"], 1, 0))
+      model_evaluation[base::paste0("test", epoch), ] = scDEDS::model_evaluate(prediction_test, standard_test_binary)
+      print(model_evaluation[base::paste0("test", epoch), ])
+      base::saveRDS(model_performance, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/model_performance.rds")
+      base::saveRDS(model_evaluation, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/model_evaluation.rds")
+      
+      
+      # Early Stopping Strategy
+      if (epoch == max_epochs) {
+        best_num = base::which.max(base::as.numeric(model_performance["kappa_validate", ]))
+        
+        best_para_vec = para_data_frame[best_num, ]
+        best_loss_threshold_lower = model_performance["loss_validate_threshold_lower", best_num]
+        best_loss_threshold_upper = model_performance["loss_validate_threshold_upper", best_num]
+        best_validate_kappa = base::max(base::as.numeric(model_performance["kappa_validate", ]))
+        test_kappa = model_performance["kappa_test", best_num]
+        message(base::paste0("Algorithm converged, with a kappa of ", base::round(best_validate_kappa, 6), " for the validation set and a kappa of ", base::round(test_kappa, 6), " for the test set."))
+        
+        base::names(prediction_train) = base::rownames(train_data)
+        base::names(prediction_validate) = base::rownames(validate_data)
+        base::names(prediction_test) = base::rownames(test_data)
+        best_pred_result = base::do.call(base::rbind, parallel::mclapply(base::rownames(best_pred_result), function(TG_TF) {
+          temp_row = best_pred_result[TG_TF, ]
+          dataset_type = temp_row[, "dataset"]
+          if (dataset_type == "training_set" && !base::is.na(prediction_train[TG_TF]) && prediction_train[TG_TF] != 0) {
+            temp_row[, base::paste0("theta_p_branch", n)] = theta_p_cal(TG_TF = TG_TF, data = train_data, best_para_vec = best_para_vec)
+            temp_row[, base::paste0("theta_p_bin_branch", n)] = prediction_train[TG_TF]
+          } else if (dataset_type == "validation_set" && !base::is.na(prediction_validate[TG_TF]) && prediction_validate[TG_TF] != 0) {
+            temp_row[, base::paste0("theta_p_branch", n)] = theta_p_cal(TG_TF = TG_TF, data = validate_data, best_para_vec = best_para_vec)
+            temp_row[, base::paste0("theta_p_bin_branch", n)] = prediction_validate[TG_TF]
+          } else if (dataset_type == "test_set" && !base::is.na(prediction_test[TG_TF]) && prediction_test[TG_TF] != 0) {
+            temp_row[, base::paste0("theta_p_branch", n)] = theta_p_cal(TG_TF = TG_TF, data = test_data, best_para_vec = best_para_vec)
+            temp_row[, base::paste0("theta_p_bin_branch", n)] = prediction_test[TG_TF]
+          }
+          return(temp_row)
+        }, mc.cores = parallel::detectCores() - 1))
+        
+        interest_cell_type_branch_model_train[[cell_type]][[base::paste0("pred_result_branch", n)]] = base::list(
+          "model_performance" = model_performance, 
+          "para_data_frame" = para_data_frame, 
+          "model_evaluation" = model_evaluation, 
+          "best_para_vec" = best_para_vec, 
+          "best_loss_threshold_lower" = best_loss_threshold_lower, 
+          "best_loss_threshold_upper" = best_loss_threshold_upper, 
+          "best_validate_kappa" = best_validate_kappa, 
+          "test_kappa" = test_kappa
+        )
+        base::saveRDS(
+          interest_cell_type_branch_model_train[[cell_type]][[base::paste0("pred_result_branch", n)]], 
+          file = base::paste0("./4.2 BUild Prediction Model - Model Training And Evaluation/", cell_type, "_branch", n, "_model_train.rds")
+        )
+        base::save.image(base::paste0("./4.2 BUild Prediction Model - Model Training And Evaluation/code4.2test_", cell_type, "_branch", n, ".RData"))
+        break
+      } else if (epoch > early_stop) {
+        if (base::all(
+          model_performance["kappa_validate", (epoch - early_stop + 1):epoch] <= model_performance["kappa_validate", epoch - early_stop]
+        )) {
+          best_para_vec = para_data_frame[epoch - early_stop, ]
+          best_loss_threshold_lower = model_performance["loss_validate_threshold_lower", epoch - early_stop]
+          best_loss_threshold_upper = model_performance["loss_validate_threshold_upper", epoch - early_stop]
+          best_validate_kappa = model_performance["kappa_validate", epoch - early_stop]
+          test_kappa = model_performance["kappa_test", epoch - early_stop]
+          message(base::paste0("Algorithm converged, with a kappa of ", base::round(best_validate_kappa, 6), " for the validation set and a kappa of ", base::round(test_kappa, 6), " for the test set."))
+          
+          base::names(prediction_train) = base::rownames(train_data)
+          base::names(prediction_validate) = base::rownames(validate_data)
+          base::names(prediction_test) = base::rownames(test_data)
+          best_pred_result = base::do.call(base::rbind, parallel::mclapply(base::rownames(best_pred_result), function(TG_TF) {
+            temp_row = best_pred_result[TG_TF, ]
+            dataset_type = temp_row[, "dataset"]
+            if (dataset_type == "training_set" && !base::is.na(prediction_train[TG_TF]) && prediction_train[TG_TF] != 0) {
+              temp_row[, base::paste0("theta_p_branch", n)] = theta_p_cal(TG_TF = TG_TF, data = train_data, best_para_vec = best_para_vec)
+              temp_row[, base::paste0("theta_p_bin_branch", n)] = prediction_train[TG_TF]
+            } else if (dataset_type == "validation_set" && !base::is.na(prediction_validate[TG_TF]) && prediction_validate[TG_TF] != 0) {
+              temp_row[, base::paste0("theta_p_branch", n)] = theta_p_cal(TG_TF = TG_TF, data = validate_data, best_para_vec = best_para_vec)
+              temp_row[, base::paste0("theta_p_bin_branch", n)] = prediction_validate[TG_TF]
+            } else if (dataset_type == "test_set" && !base::is.na(prediction_test[TG_TF]) && prediction_test[TG_TF] != 0) {
+              temp_row[, base::paste0("theta_p_branch", n)] = theta_p_cal(TG_TF = TG_TF, data = test_data, best_para_vec = best_para_vec)
+              temp_row[, base::paste0("theta_p_bin_branch", n)] = prediction_test[TG_TF]
+            }
+            return(temp_row)
+          }, mc.cores = parallel::detectCores() - 1))
+          
+          interest_cell_type_branch_model_train[[cell_type]][[base::paste0("pred_result_branch", n)]] = base::list(
+            "model_performance" = model_performance, 
+            "para_data_frame" = para_data_frame, 
+            "model_evaluation" = model_evaluation, 
+            "best_para_vec" = best_para_vec, 
+            "best_loss_threshold_lower" = best_loss_threshold_lower, 
+            "best_loss_threshold_upper" = best_loss_threshold_upper, 
+            "best_validate_kappa" = best_validate_kappa, 
+            "test_kappa" = test_kappa, 
+            "best_pred_result" = best_pred_result
+          )
+          base::saveRDS(
+            interest_cell_type_branch_model_train[[cell_type]][[base::paste0("pred_result_branch", n)]], 
+            file = base::paste0("./4.2 BUild Prediction Model - Model Training And Evaluation/", cell_type, "_branch", n, "_model_train.rds")
+          )
+          base::save.image(base::paste0("./4.2 BUild Prediction Model - Model Training And Evaluation/code4.2test_", cell_type, "_branch", n, ".RData"))
+          break
+        }
+      }
+    }
+  }
+  
+  best_pred_result$theta_p_bin = base::as.integer(base::rowSums(
+    best_pred_result[, base::grep("^theta_p_bin_branch\\d+$", base::names(best_pred_result))]) > 0)
+  weights = base::unlist(interest_cell_type_genes_pseudotime_info[[cell_type]][["Branches_n_cell"]])
+  best_pred_result$theta_p = base::apply(best_pred_result[, base::grep("^theta_p_branch([0-9]{1,2})$", base::names(best_pred_result), value = TRUE)], 1, function(x) {
+    non_zero_idx = which(x != 0)
+    if (base::length(non_zero_idx) == 0) 0 else {
+      base::sum(x[non_zero_idx] * weights[non_zero_idx]) / base::sum(weights[non_zero_idx])
+    }
+  })
+  
+  interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]] = base::list()
+  interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]][["pred_result"]] = best_pred_result
+  interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]][["evaluation"]] = base::as.data.frame(base::matrix(
+    data = 0, nrow = 3, ncol = 15, 
+    dimnames = base::list(
+      c("train", "validate", "test"), 
+      c("TP", "TN", "FP", "FN", 
+        "Accuracy", "Recall", "Precision", "Specificity", "NegPredRate", 
+        "Kappa", "F1", "Prevalence", "DetectionRate", "BalancedAccuracy", "auc"))
+  ))
+  train_result = best_pred_result[best_pred_result$dataset == "training_set", ]
+  validate_result = best_pred_result[best_pred_result$dataset == "validation_set", ]
+  test_result = best_pred_result[best_pred_result$dataset == "test_set", ]
+  interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]][["evaluation"]]["train", ] = 
+    model_evaluate(train_result$theta_p_bin, train_result$theta_s_bin)
+  interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]][["evaluation"]]["validate", ] = 
+    scDEDS::model_evaluate(validate_result$theta_p_bin, validate_result$theta_s_bin)
+  interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]][["evaluation"]]["test", ] = 
+    scDEDS::model_evaluate(test_result$theta_p_bin, test_result$theta_s_bin)
+}; base::print(base::Sys.time() - T1)
+base::saveRDS(interest_cell_type_branch_model_train, file = "./4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_model_train.rds")
+base::save.image("./4.2 BUild Prediction Model - Model Training And Evaluation/code4.2.RData")
