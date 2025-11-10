@@ -100,9 +100,9 @@ get_genes_pseudotime_info = function(interest_cell_type_Branches = interest_cell
       for (ii in 1:3) {
         Branches_RNA[[i]] = Branches_RNA[[i]][base::rowSums(base::as.matrix(Branches_RNA[[i]]@assays$RNA$counts)) > 0, ]
         Branches_RNA[[i]] = Branches_RNA[[i]][, base::colSums(base::as.matrix(Branches_RNA[[i]]@assays$RNA$counts)) > 0]
-        zero_frequency = base::rowMeans(base::as.data.frame(SeuratObject::GetAssayData(Branches_RNA[[i]], layer = "counts")) == 0)
+        zero_frequency = base::rowMeans(base::as.data.frame(base::as.matrix(SeuratObject::GetAssayData(Branches_RNA[[i]], layer = "counts")) == 0))
         Branches_RNA[[i]] = subset(Branches_RNA[[i]], features = base::names(zero_frequency[zero_frequency <= alpha_gene]))
-        zero_frequency = base::colMeans(base::as.data.frame(SeuratObject::GetAssayData(Branches_RNA[[i]], layer = "counts")) == 0)
+        zero_frequency = base::colMeans(base::as.data.frame(base::as.matrix(SeuratObject::GetAssayData(Branches_RNA[[i]], layer = "counts")) == 0))
         Branches_RNA[[i]] = subset(Branches_RNA[[i]], cells = base::names(zero_frequency[zero_frequency <= alpha_cell]))
       }
 
@@ -152,12 +152,12 @@ get_genes_pseudotime_info = function(interest_cell_type_Branches = interest_cell
     for (i in base::seq_along(Branches)) {
       message("Obtaining temporal expression vectors for each TF in branch ", i, ".")
       Branches_TFE[[i]] =
-        base::as.data.frame(SeuratObject::GetAssayData(Branches_RNA[[i]], layer = "data"))[Branches_TFs[[i]], ]
+        base::as.data.frame(base::as.matrix(SeuratObject::GetAssayData(Branches_RNA[[i]], layer = "data")))[Branches_TFs[[i]], ]
       Branches_TFE[[i]] = Branches_TFE[[i]][, base::order(base::as.integer(base::colnames(Branches_TFE[[i]])))]
 
       message("Obtaining temporal activity vectors for each TG in branch ", i, ".")
       Branches_TGA[[i]] =
-        base::as.data.frame(SeuratObject::GetAssayData(Branches_ATAC[[i]], layer = "data"))[Branches_TGs[[i]], ]
+        base::as.data.frame(base::as.matrix(SeuratObject::GetAssayData(Branches_ATAC[[i]], layer = "data")))[Branches_TGs[[i]], ]
       Branches_TGA[[i]] = Branches_TGA[[i]][, base::order(base::as.integer(base::colnames(Branches_TGA[[i]])))]
 
       message("Obtaining temporal expression vectors for each TG in branch ", i, ".")
