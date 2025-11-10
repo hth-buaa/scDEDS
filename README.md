@@ -4,7 +4,7 @@
 
 ## Overview
 
-The `scDEDS` R package implements a novel framework for inferring Gene Regulatory Networks (GRNs) from single-cell multi-omics data (scRNA-seq and scATAC-seq). By modeling gene expression dynamics as a **Differential Equation Dynamical System (DEDS)**, `scDEDS` can predict context-specific regulatory interactions between Transcription Factors (TFs) and their Target Genes (TGs) across different cell states and pseudotemporal trajectories.
+The `scDEDS` R package implements a novel framework for inferring Gene Regulatory Networks (GRNs) from paired scRNA-seq and scATAC-seq data (the cells in the two datasets are identical; or, after using other methods to establish a one-to-one correspondence, the name of these matched cells is unified). By modeling gene expression dynamics as a **Differential Equation Dynamical System (DEDS)**, `scDEDS` can predict context-specific regulatory interactions between Transcription Factors (TFs) and their Target Genes (TGs) across different cell states and pseudotemporal trajectories.
 
 ### Key Features
 
@@ -13,58 +13,6 @@ The `scDEDS` R package implements a novel framework for inferring Gene Regulator
 *   **Dynamical System Modeling:** Employs a system of differential equations to model the regulatory strength (`theta_p`) of TF-TG pairs.
 *   **Machine Learning Optimization:** Combines genetic algorithms (`GA` package) and gradient descent for robust parameter estimation and model training.
 *   **Branch-Specific GRNs:** Constructs accurate, branch-specific GRNs, providing insights into dynamic regulatory changes during cellular processes.
-
-## Installation
-
-### 1. Install Dependencies
-`scDEDS` requires several CRAN and Bioconductor packages. Please run the following code in your R session to install them.
-
-r
-Install from CRAN
-install.packages("https://cran.r-project.org/src/contrib/Archive/igraph/igraph_2.0.3.tar.gz", repos = NULL, type = "source")
-install.packages(c("dplyr", "ggplot2", "Signac", "SeuratObject", "Seurat", "VGAM", "ggrepel", "minpack.lm", "data.table", "tibble", "tidyr", "pROC", "DDRTree", "GA", "psych"))
-Install from Bioconductor
-if (!require("BiocManager", quietly = TRUE))
-install.packages("BiocManager")
-BiocManager::install(c("GenomeInfoDb", "TFBSTools", "JASPAR2024", "IRanges", "ChIPseeker", "EnsDb.Hsapiens.v86", "Biobase", "BiocGenerics", "monocle", "Biostrings", "TxDb.Hsapiens.UCSC.hg38.knownGene", "BSgenome.Hsapiens.UCSC.hg38"))
-### 2. Install `scDEDS`
-Install the latest development version of `scDEDS` from GitHub:
-r
-devtools::install_github("hth-buaa/scDEDS")
-library(scDEDS)
-## Quick Start
-
-This is a minimal example to demonstrate the core workflow using built-in PBMC multi-ome data.
-r
-library(scDEDS)
-library(SeuratData) # For example data
-Load example PBMC multi-ome data
-SeuratData::InstallData("pbmcMultiome")
-scRNAseq <- SeuratData::LoadData("pbmcMultiome", "pbmc.rna")
-scATACseq <- SeuratData::LoadData("pbmcMultiome", "pbmc.atac")
-1. Identify Target Genes (TGs) via chromatin accessibility
-results_identify_TGs <- identify_TGs(
-genome_for_anno = TxDb.Hsapiens.UCSC.hg38.knownGene,
-promoter_range = 50,
-scRNAseq = scRNAseq,
-scATACseq = scATACseq,
-annoDb = "org.Hs.eg.db"
-)
-2. Get TF information from JASPAR2024 database
-TFs_in_JASPAR2024 <- get_TGs_from_JASPAR2024(
-scRNAseq = scRNAseq,
-species = "Homo sapiens"
-)
-3. Generate expression and activity matrices
-Basic_Info <- get_expression_and_activity_matrix(
-TGs = results_identify_TGs$TGs,
-TFs = TFs_in_JASPAR2024,
-scRNAseq = scRNAseq,
-scATACseq = scATACseq,
-promoter_range = 50,
-path = "/path/to/your/fragments.tsv.gz" # Replace with your path
-)
-*Note: The full, complete workflow is extensive and computationally intensive. Please refer to the Full Workflow section and the provided test script for detailed instructions.*
 
 ## Full Workflow
 
@@ -82,7 +30,7 @@ The complete analytical pipeline of `scDEDS` is structured into four main parts:
 *   **`cell_grouping()`:** Groups cells along pseudotime to reduce noise and facilitate the calculation of group-wise averages (`TFE_T`, `TGA_T`, `TGE_T`).
 
 ### Part 3: Standard GRN Construction
-*   **`get_sGRN_by_TFBS_pwm_by_JASPAR2024()`:** Builds a prior, standard GRN (sGRN) by scanning TG promoters for TF binding sites (TFBS) using PWM models from JASPAR2024.
+*   **`get_sGRN_by_TFBS_pwm_by_JASPAR2024()`:** Builds a prior, standard GRN (sGRN) (alse called as initial GRN, iGRN) by scanning TG promoters for TF binding sites (TFBS) using PWM models from JASPAR2024.
 *   **`get_branch_sGRN()` & `get_sGRN()`:** Constructs branch-specific and overall cell-type-specific sGRNs, which serve as the ground truth for training the predictive model.
 
 ### Part 4: DEDS Predictive Model Training
@@ -107,23 +55,10 @@ The final output of `scDEDS` is a comprehensive list object (`interest_cell_type
 
 The model training process is **extremely computationally intensive**.
 *   **OS:** Linux is highly recommended. Windows users can use WSL2.
-*   **CPU:** A high-core-count CPU (>= 40 cores) is strongly advised.
-*   **RAM:** At least 128 GB of RAM is required. 256 GB or more is preferable for larger datasets.
-*   **Time:** Training for one cell type can take **several days** (e.g., ~11 days for CD14 Mono on a powerful server).
+*   **CPU:** A high-core-count CPU (e.g., >= 40 cores) is strongly advised.
+*   **RAM:** A big RAM is highly recommended (e.g. for data with 1000 cells and 20,000 genes, >= 64 GB is recommended, and more is of course better).
+*   **Time:** Training for one cell type may take **several days** (e.g., ~11 days for CD14 Mono in the paper on a powerful server with 200 GB RAM in WSL2).
 
-## Citation
+## Specific Guidelines
 
-If you use `scDEDS` in your research, please cite:
-
-> *[Publication/Preprint Title]*
-> *[Authors]*
-> *[Journal/Repository], [Year].*
-> *DOI/BioRxiv link to be provided.*
-
-## License
-
-This project is licensed under the MIT License.
-
-## Contact
-
-For questions, bug reports, or contributions, please open an issue on the [GitHub repository](https://github.com/hth-buaa/scDEDS) or contact the maintainer.
+*   See in article_experiment_code.txt.
