@@ -1,0 +1,127 @@
+library(ggplot2)
+library(tidyverse)
+
+# setwd("D:/pbmc-equation/")
+setwd("/mnt/d/pbmc-equation/")
+
+cell_type = "CD14 Mono"
+# cell_type = "CD4 Naive"
+# cell_type = "CD8 Naive"
+# cell_type = "CD4 TCM"
+
+interest_cell_type_sGRN <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/3 get sGRN/interest_cell_type_sGRN.rds"))
+interest_cell_type_branch_sGRN <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/3 get sGRN/interest_cell_type_branch_sGRN.rds"))
+
+n <- length(interest_cell_type_branch_sGRN[[cell_type]]) + 1
+df_list <- list()
+for (i in 1:(n-1)) {
+  values = as.numeric(unlist(interest_cell_type_branch_sGRN[[cell_type]][[i]]))
+  df <- data.frame(value = values, group = paste0("Branch", i))
+  df_list[[paste0("Branch", i)]] <- df
+}
+df_list[["All"]] = data.frame(value = as.numeric(unlist(interest_cell_type_sGRN[[cell_type]])), 
+                              group = "All")
+combined_df <- bind_rows(df_list)
+non_zero_df <- combined_df %>% filter(value != 0)
+
+summary_df <- non_zero_df %>%
+  group_by(group) %>%
+  summarise(
+    min = min(value),
+    q1 = quantile(value, 0.25),
+    median = median(value),
+    q3 = quantile(value, 0.75),
+    max = max(value)
+  )
+
+# Create violin plot and add labels
+vbplot = ggplot(non_zero_df, aes(x = group, y = value, fill = group)) +
+  geom_violin(
+    trim = FALSE,          # Do not trim tails to show complete density
+    alpha = 0.2,           # Set transparency
+    width = 0.8,           # Adjust violin width
+    scale = "area"         # Area normalization (default), ensure all violins have the same area
+  ) +
+  
+  geom_boxplot(
+    width = 0.15,          # Boxplot width
+    fill = "white",        # Boxplot fill color
+    outlier.shape = NA,    # Do not show outlier points (avoid overlap)
+    alpha = 0.8
+  ) +
+  
+  # stat_summary(
+  #   fun = "mean",          # Show mean points
+  #   geom = "point",
+  #   shape = 21,
+  #   size = 3,
+  #   fill = "red"
+  # ) +
+  
+  # Add minimum value labels (at the bottom of the violin plot)
+  geom_text(
+    data = summary_df,
+    aes(x = group, y = min, label = round(min, 3)),
+    vjust = 1.5,           # Place label below the point
+    color = "darkblue",
+    size = 4,
+    fontface = "bold"
+  ) +
+  
+  # Add maximum value labels (at the top of the violin plot)
+  geom_text(
+    data = summary_df,
+    aes(x = group, y = max, label = round(max, 3)),
+    vjust = -1.5,          # Place label above the point
+    color = "darkred",
+    size = 4,
+    fontface = "bold"
+  ) +
+  
+  # Add median labels (near the median line of the boxplot)
+  geom_text(
+    data = summary_df,
+    aes(x = group, y = median, label = round(median, 3)),
+    vjust = -0.5,          # Place label above the line
+    color = "black",
+    size = 4,
+    fontface = "bold"
+  ) +
+  
+  # Add first quartile (Q1) labels (at the bottom of the boxplot box)
+  geom_text(
+    data = summary_df,
+    aes(x = group, y = q1, label = round(q1, 3)),
+    vjust = 1.5,           # Place label below the line
+    color = "darkgreen",
+    size = 4,
+    fontface = "bold"
+  ) +
+  
+  # Add third quartile (Q3) labels (at the top of the boxplot box)
+  geom_text(
+    data = summary_df,
+    aes(x = group, y = q3, label = round(q3, 3)),
+    vjust = -1.5 + 0.6,          # Place label above the line
+    color = "purple",
+    size = 4,
+    fontface = "bold"
+  ) +
+  
+  scale_fill_brewer(palette = "Set2") +  # Use ColorBrewer palette
+  theme_minimal(base_size = 14) +        # Use minimalist them
+  labs(
+    title = paste0(cell_type, " sGRN θ(>0) Violin and Bar Plot"),
+    # subtitle = "Each violin represents the non-zero value density distribution of a data frame | Labels show min, Q1, median, Q3, max",
+    x = "",
+    y = ""#,
+    #fill = "Data Frame"
+  ) +
+  theme(
+    plot.title = element_text(size = 12, hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "none"  # Hide legend (x-axis already labeled)
+  )
+print(vbplot)
+ggsave(filename = paste0("./Results/2 branch/", cell_type, " sGRN theta Violin and Bar Plot.png"), plot = vbplot, 
+       width = 1 * (n + 1) + ifelse(cell_type == "CD14 Mono", 0.6, 0), height = 4)

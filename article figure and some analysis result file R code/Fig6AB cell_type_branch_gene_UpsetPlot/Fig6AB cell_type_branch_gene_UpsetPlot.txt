@@ -1,0 +1,90 @@
+library(UpSetR)
+library(grid)
+
+setwd("D:/pbmc-equation/")
+
+
+# cell_type = "CD14 Mono"
+cell_type = "CD4 Naive"
+# cell_type = "CD8 Naive"
+# cell_type = "CD4 TCM"
+
+interest_cell_type_genes_pseudotime_info <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/2.2 Data Processing - Cell Grouping/interest_cell_type_genes_pseudotime_info.rds"))
+# interest_cell_type_genes_pseudotime_info <- readRDS(paste0("./2.2 Data Processing - Cell Grouping/interest_cell_type_genes_pseudotime_info.rds"))
+
+gene_type = "TFGs"
+# gene_type = "TGs"
+
+venn_list = interest_cell_type_genes_pseudotime_info[[cell_type]][[paste0("Branches_", ifelse(gene_type == "TFGs", "TFs", "TGs"))]]
+names(venn_list) = paste0("Branch", 1:length(venn_list))
+
+all_genes <- unique(unlist(venn_list))
+branch_names <- names(venn_list)
+binary_matrix <- matrix(0, 
+                        nrow = length(all_genes), 
+                        ncol = length(branch_names),
+                        dimnames = list(all_genes, branch_names))
+for (col_name in branch_names) {
+  binary_matrix[all_genes %in% venn_list[[col_name]], col_name] <- 1
+}
+
+png(
+  filename = paste0("./Results/2 branch/", cell_type, " Branches ", gene_type, " Upset Plot.png"),
+  width = 2 * length(venn_list) + 4, 
+  height = 1.5 * length(venn_list) + 4, 
+  units = "in",
+  res = 300
+)
+
+upset(
+  data = as.data.frame(binary_matrix), 
+  nsets = length(venn_list), 
+  nintersects = NA, 
+  sets = NULL,
+  keep.order = F, 
+  set.metadata = NULL, 
+  intersections = NULL,
+  matrix.color = "gray23", 
+  main.bar.color = "gray23",
+  mainbar.y.label = "Intersection Size", 
+  mainbar.y.max = NULL,
+  sets.bar.color = "gray23", 
+  sets.x.label = "Set Size",
+  point.size = 2.2, 
+  line.size = 0.7, 
+  mb.ratio = c(0.6, 0.4),
+  expression = NULL, 
+  att.pos = NULL, 
+  # att.color = main.bar.color,
+  order.by = c("freq", "degree"), 
+  decreasing = c(T, F),
+  show.numbers = "yes", 
+  number.angles = 0, 
+  group.by = "degree",
+  cutoff = NULL, 
+  queries = NULL, 
+  query.legend = "none",
+  shade.color = "gray88", 
+  shade.alpha = 0.25, 
+  matrix.dot.alpha = 0.5,
+  empty.intersections = NULL, 
+  color.pal = 1, 
+  boxplot.summary = NULL,
+  attribute.plots = NULL, 
+  scale.intersections = "identity",
+  scale.sets = "identity", 
+  text.scale = 2.5, 
+  set_size.angles = 0,
+  set_size.show = T, 
+  set_size.numbers_size = NULL,
+  set_size.scale_max = nrow(binary_matrix) + ifelse(length(venn_list) <= 2, 47, 10)
+)
+
+grid.text(label = paste(cell_type, " Total ", gene_type, ":", nrow(binary_matrix)),
+          x = unit(0.5, "npc"), # Horizontal position: near left boundary (5%)
+          y = unit(0.05, "npc"), # Vertical position: near top boundary (95%)
+          gp = gpar(fontsize = 16, fontface = "bold"), # Text style: size and bold
+          just = c("left", "top") # Alignment: top-left of text aligned to specified coordinates
+)
+
+dev.off()

@@ -1,0 +1,869 @@
+# Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+# rm(list=ls())
+
+setwd("D:/pbmc-equation/")
+cell_types = c("CD14 Mono", "CD4 Naive", "CD8 Naive", "CD4 TCM")
+
+
+
+############### 1 Each Branch Training Line Chart ###############
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(stringr)
+
+for (cell_type in c("CD14 Mono", "CD4 Naive", "CD8 Naive", "CD4 TCM")) {
+  interest_cell_type_branch_model_train <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_model_train.rds"))
+  n_branch = length(interest_cell_type_branch_model_train[[cell_type]]) - 1
+  
+  model_performance = list()
+  for (n in 1:n_branch) {
+    model_performance[[n]] = interest_cell_type_branch_model_train[[cell_type]][[paste0("pred_result_branch", n)]][["model_performance"]]
+    model_performance[[n]] <- model_performance[[n]][grepl("kappa", rownames(model_performance[[n]])), ]
+    rownames(model_performance[[n]]) = paste0("Branch", n, "_", rownames(model_performance[[n]]))
+  }; rm(n)
+  model_performance <- do.call(rbind, model_performance)
+  
+  model_performance = model_performance[, -which(colSums(model_performance != 0) == 0)]
+
+  # First convert the data to long format suitable for ggplot2
+  data_long <- model_performance %>%
+    tibble::rownames_to_column("Metric") %>% 
+    pivot_longer(cols = -Metric, names_to = "Iteration", values_to = "Value") %>%
+    mutate(Iteration = as.numeric(Iteration)) 
+  
+  # Extract branch number, metric type and dataset type from the Metric column
+  data_long <- data_long %>%
+    mutate(
+      Branch = str_extract(Metric, "Branch\\d+"),
+      Metric_Type = case_when(
+        str_detect(Metric, "kappa_train") ~ "train",
+        str_detect(Metric, "kappa_validate") ~ "validate",
+        str_detect(Metric, "kappa_test") ~ "test",
+        TRUE ~ "other"
+      )
+    )
+  
+  # Handle zero values after convergence: find the starting position of the first continuous zero for each metric
+  zero_threshold <- data_long %>%
+    group_by(Metric) %>%
+    arrange(Iteration) %>%
+    mutate(
+      is_zero = Value == 0,
+      zero_group = cumsum(is_zero & !lag(is_zero, default = FALSE))
+    ) %>%
+    filter(is_zero) %>%
+    group_by(Metric, zero_group) %>%
+    summarise(
+      first_zero_iteration = min(Iteration),
+      .groups = 'drop'
+    ) %>%
+    group_by(Metric) %>%
+    slice_min(first_zero_iteration, n = 1) %>%
+    dplyr::select(Metric, first_zero_iteration)
+  
+  # Merge back to the main data frame and filter out data points after convergence
+  data_long <- data_long %>%
+    left_join(zero_threshold, by = "Metric") %>%
+    mutate(
+      first_zero_iteration = ifelse(is.na(first_zero_iteration), max(Iteration) + 1, first_zero_iteration)
+    ) %>%
+    filter(Iteration < first_zero_iteration)
+  
+  # Create a data frame to define three line segments: each line needs a start and end point
+  line_data <- data.frame(
+    x_start = c(1, 1, 1),
+    x_end   = c(ncol(model_performance), ncol(model_performance), ncol(model_performance)),
+    y_start = c(0.8, 0.9, 1),
+    y_end   = c(0.8, 0.9, 1)
+  )
+  
+  # Create line chart
+  linechart = ggplot(data_long, aes(x = Iteration, y = Value, group = Metric)) +
+    
+    # Use annotate to add light yellow rectangular area (y-axis 0.8 to 1, x-axis all)
+    annotate("rect", 
+             xmin = min(data_long$Iteration), 
+             xmax = max(data_long$Iteration), 
+             ymin = 0.8, 
+             ymax = 1,
+             fill = "lightyellow", 
+             alpha = 0.3) + # 0.3
+    
+    # Add three dark orange line segments
+    geom_segment(
+      data = line_data,
+      aes(
+        x = x_start, y = y_start,
+        xend = x_end, yend = y_end
+      ),
+      color = "darkorange", 
+      linewidth = 1.2, 
+      inherit.aes = FALSE 
+    ) + 
+    
+    # Set color based on Metric_Type, set line type based on Branch
+    geom_line(aes(color = Metric_Type, linetype = Branch), linewidth = 1) +
+    geom_point(aes(color = Metric_Type), size = 1.5, alpha = 0.7) +
+    
+    # Custom colors
+    scale_color_manual(
+      name = "Dataset",
+      values = c("train" = "red", "validate" = "blue", "test" = "darkgreen"),
+      labels = c("train" = "Training", "validate" = "Validation", "test" = "Test")
+    ) +
+    
+    # Custom line types (using different branches)
+    scale_linetype_discrete(name = "Branch") +
+    
+    # Set y-axis tick interval to 0.1
+    scale_y_continuous(
+      breaks = seq(0, 1, by = 0.1)  # From 0 to 1, interval 0.1
+    ) +
+    
+    # Axes and titles
+    labs(
+      title = paste0(cell_type, " Each Branch Training Line Chart"),
+      x = "Iteration",
+      y = "Kappa",
+      color = "Dataset Type"
+    ) +
+    
+    # Theme settings
+    theme_minimal() +
+    # theme(
+    #   legend.position = "right",
+    #   plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    #   axis.title = element_text(size = 12, face = "bold"),
+    #   axis.text = element_text(size = 10),
+    #   legend.title = element_text(face = "bold"),
+    #   panel.grid.minor = element_blank()
+    # ) +
+    
+    theme(
+      legend.position = "right",
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+      axis.title.x = element_text(size = 22), 
+      axis.title.y = element_text(size = 22), 
+      axis.text.x = element_text(size = 14), 
+      axis.text.y = element_text(size = 14), 
+      legend.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    ) +
+    
+    # Ensure x-axis displays all iteration numbers
+    scale_x_continuous(breaks = unique(data_long$Iteration))
+  
+  print(linechart)
+  ggsave(filename = paste0("./Results/5 model/", cell_type, " Each Branch Training Line Chart.png"), 
+         plot = linechart, 
+         # width = ncol(model_performance) ^ 0.7, 
+         width = 12, 
+         height = 8, limitsize = FALSE, dpi = 600)
+  
+
+  
+  model_performance_export = round(model_performance, digits = 3)
+  model_performance_export <- cbind(
+    data.frame("dataset" = rownames(model_performance), stringsAsFactors = FALSE), 
+    model_performance_export
+  )
+  rownames(model_performance_export) <- NULL
+  openxlsx::write.xlsx(
+    model_performance_export, 
+    file = paste0("./Results/5 model/", cell_type, " model train.xlsx"), 
+    rowNames = FALSE, 
+    colNames = TRUE
+  )
+}
+
+
+
+############### 2 Evaluation_Radar_Chart ###############
+library(fmsb)
+library(scales)
+library(ggsci)
+
+##### 2.1 generate data in R #####
+library(tibble)
+# install.packages("writexl")
+# library(writexl)
+
+setwd("D:/pbmc-equation/")
+# setwd("/mnt/d/pbmc-equation/")
+
+for (cell_type in c("CD14 Mono", "CD4 Naive", "CD8 Naive", "CD4 TCM")) {
+  methods_radar <- data.frame(
+    Index = c("TP", "TN", "FP", "FN", "Accuracy", "Recall", "Precision", "F1", "AUC", "Kappa"),
+    max_value = 0,
+    min_value = 0,
+    train = 0,
+    validation = 0,
+    test = 0
+  )
+  rownames(methods_radar) = methods_radar$Index
+  
+  # branch_model_train <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/4.2 BUild Prediction Model - Model Training And Evaluation/CD4_Naive_branch_model_train.rds"))
+  branch_model_train <- readRDS(paste0(
+    "../pbmc-equation/pr50 newest for paper/", 
+    cell_type, 
+    " result pr50/4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_model_train.rds"
+  ))
+  branch_model_train = branch_model_train[[cell_type]][["best_pred_result"]][["evaluation"]]
+  methods_radar[c("TP", "TN", "FP", "FN", "Accuracy", "Recall", "Precision", "F1", "AUC", "Kappa"), "train"] =
+    as.numeric(branch_model_train["train", c("TP", "TN", "FP", "FN", "Accuracy", "Recall", "Precision", "F1", "auc", "Kappa")])
+  methods_radar[c("TP", "TN", "FP", "FN", "Accuracy", "Recall", "Precision", "F1", "AUC", "Kappa"), "validation"] =
+    as.numeric(branch_model_train["validate", c("TP", "TN", "FP", "FN", "Accuracy", "Recall", "Precision", "F1", "auc", "Kappa")])
+  methods_radar[c("TP", "TN", "FP", "FN", "Accuracy", "Recall", "Precision", "F1", "AUC", "Kappa"), "test"] = 
+    as.numeric(branch_model_train["test", c("TP", "TN", "FP", "FN", "Accuracy", "Recall", "Precision", "F1", "auc", "Kappa")])
+  
+  methods_radar[c("TP", "TN", "FP", "FN"), "max_value"] <- 
+    ceiling(as.numeric(apply(methods_radar[c("TP", "TN", "FP", "FN"), -1], 1, max)) * 1.1)
+  methods_radar[c("Accuracy", "Recall", "Precision", "F1", "AUC", "Kappa"), "max_value"] = 1
+  methods_radar[sapply(methods_radar, is.numeric)] <- round(methods_radar[sapply(methods_radar, is.numeric)], 2)
+  
+  methods_radar[c("TP", "TN", "FP", "FN"), "min_value"] <- 
+    as.numeric(apply(methods_radar[c("TP", "TN", "FP", "FN"), -(1:3)], 1, min)) * 0.8 - 
+    methods_radar[c("TP", "TN", "FP", "FN"), "max_value"] * 0.2
+  
+  
+  methods_radar[c("Accuracy", "Recall", "Precision", "F1", "AUC", "Kappa"), "min_value"] <- 
+    as.numeric(apply(methods_radar[c("Accuracy", "Recall", "Precision", "F1", "AUC", "Kappa"), -(1:3)], 1, min)) * 0.95
+  
+  
+  methods_radar = as.data.frame(t(methods_radar))
+  methods_radar = methods_radar[-1,]
+  
+  for (col in colnames(methods_radar)) {
+    methods_radar[, col] = as.numeric(methods_radar[, col])
+    
+    if (methods_radar["max_value", col] == methods_radar["min_value", col]) {
+      methods_radar["max_value", col] = methods_radar["max_value", col] + 1
+      methods_radar["min_value", col] = methods_radar["min_value", col] - 1
+    }
+  }
+  
+  print(methods_radar)
+  
+  methods_radar_export = methods_radar
+  methods_radar_export <- cbind(
+    data.frame("index" = rownames(methods_radar_export), stringsAsFactors = FALSE), 
+    methods_radar_export
+  )
+  rownames(methods_radar_export) <- NULL
+  methods_radar_export <- methods_radar_export[-c(1,2), ]
+  openxlsx::write.xlsx(
+    methods_radar_export, 
+    file = paste0("./Results/5 model/", cell_type, " model and baseline evaluation.xlsx"), 
+    rowNames = FALSE, 
+    colNames = TRUE 
+  )
+  
+  dat = methods_radar
+  data = dat[3:nrow(dat), ]
+  max_min = dat[1:2, ]
+  
+  generate_distinct_colors <- function(n, method = "auto") {
+    if (method == "auto") {
+      # Automatically select the best method based on n size
+      if (n <= 8) {
+        return(RColorBrewer::brewer.pal(n, "Set2"))
+      } else if (n <= 12) {
+        return(RColorBrewer::brewer.pal(n, "Set3"))
+      } else {
+        # For large number of colors, use HSV method
+        hues <- seq(0, 1, length.out = n + 1)[1:n]
+        return(hsv(h = hues, s = 0.8, v = 0.9))
+      }
+    } else if (method == "brewer") {
+      if (!require(RColorBrewer)) install.packages("RColorBrewer")
+      qual_col_pals <- brewer.pal.info[brewer.pal.info$category == "qual", ]
+      col_vector <- unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+      if (n > length(col_vector)) {
+        return(colorRampPalette(col_vector)(n))
+      } else {
+        return(col_vector[1:n])
+      }
+    } else if (method == "viridis") {
+      if (!require(viridis)) install.packages("viridis")
+      return(viridis(n))
+    } else if (method == "hsv") {
+      hues <- seq(0, 1, length.out = n + 1)[1:n]
+      return(hsv(h = hues, s = 0.8, v = 0.9))
+    } else {
+      stop("Unknown method. Please choose 'auto', 'brewer', 'viridis' or 'hsv'.")
+    }
+  }
+  colors <- generate_distinct_colors(nrow(dat) - 2, method = "auto")
+  make_color_darker_hcl <- function(hex_color, lightness_reduction = 10) {
+    # Convert hex code to HCL coordinates
+    hcl_vec <- rgb2hsv(col2rgb(hex_color))
+    hcl_mtx <- matrix(hcl_vec, nrow=3, dimnames=list(c("h","s","v"), NULL))
+    # Reduce brightness value (V represents Value/brightness)
+    hcl_mtx["v", ] <- hcl_mtx["v", ] * (1 - lightness_reduction/100)
+    # Convert HSV back to hex color code
+    return(hsv(h = hcl_mtx["h", ], s = hcl_mtx["s", ], v = hcl_mtx["v", ]))
+  }
+  colors <- make_color_darker_hcl(colors, lightness_reduction = 25)
+  
+  png(filename = paste0("./Results/5 model/", gsub(" ", "_", cell_type), "methods_evaluation_radar_chart.png"), 
+      width = 7.5,
+      height = 6.5 * 5/4,
+      units = "in",
+      res = 600) 
+  
+  radarchart(
+    
+    # Radar chart data structure and basic axis form
+    df = dat, 
+    axistype = 0, 
+    maxmin = TRUE,
+    # centerzero = FALSE,
+    centerzero = TRUE,
+    seg = 4,
+    na.itp = FALSE,
+    
+    # Data series style
+    # pcol = 1:nrow(dat),
+    pcol = colors,
+    plwd = 1,
+    plty = 1,
+    pfcol = NA,
+    pty = 32, # Dot 16
+    pdensity = NULL,
+    pangle = 45,
+    
+    # Grid and background
+    cglty = 2,
+    cglwd = 1,
+    cglcol = "grey",
+    
+    # Labels and title
+    vlabels = colnames(dat),
+    vlcex = 1.5,
+    caxislabels = NULL,
+    calcex = NULL,
+    paxislabels = NULL,
+    palcex = NULL,
+    axislabcol = "blue",
+    title = paste0(cell_type, " Methods Evaluation Radar Chart")
+  )
+  
+  # Add legend
+  legend(
+    # x = "bottom",
+    # x = -1.35,
+    x = 0,
+    y = 1.33,
+    xjust = 0.5,
+    yjust = 0.5, 
+    legend = rownames(data), 
+    bty = "n",
+    pch = 32,
+    lty = 1,
+    col = colors, 
+    text.col = "black", 
+    cex = 1.2,
+    pt.cex = 1.5, 
+    xpd = TRUE,
+    # horiz = TRUE,
+    ncol = 3
+  )
+  
+  # Add value labels
+  # Calculate position of each data point on radar chart and add text labels
+  for (i in 1:nrow(data)) {
+    for (j in 1:ncol(data)) {
+      # Calculate normalized value (0-1 range)
+      value_normalized <- (data[i, j] - max_min["min_value", j]) / (max_min["max_value", j] - max_min["min_value", j])
+      
+      # Calculate angle (three indicators evenly divide 360 degrees)
+      angle <- 2 * pi - (j - 1) * 2 * pi / ncol(data)
+      
+      # Calculate coordinates
+      x <- value_normalized * sin(angle)
+      y <- value_normalized * cos(angle)
+      
+      # Add text labels
+      text(x, y, labels = data[i, j], cex = 1, col = colors[i],
+           # pos = 3, offset = 0.8
+      )
+    }
+  }
+  
+  dev.off()
+}
+
+
+
+############### 3 θ differential bidirectional barplot ###############
+rm(list=ls())
+
+library(igraph)
+library(dplyr)
+library(ggraph)
+library(ggplot2)
+library(patchwork)
+
+setwd("D:/pbmc-equation/")
+options(timeout = 60000)
+
+regulon_analysis = list()
+cell_types = c("CD14 Mono", "CD4 Naive", "CD8 Naive", "CD4 TCM")
+
+
+########## 3.1 Extract regulon gene sets and average theta ##########
+change_threshold = list()
+for (cell_type in cell_types) {
+  regulon_analysis[[cell_type]] = list()
+  
+  if (cell_type == "CD14 Mono") {
+    change_threshold[[cell_type]] = 0.11
+    regulon_analysis[[cell_type]][["change_threshold"]] = change_threshold[[cell_type]]
+  } else if (cell_type == "CD4 Naive") {
+    change_threshold[[cell_type]] = 0.05
+    regulon_analysis[[cell_type]][["change_threshold"]] = change_threshold[[cell_type]]
+  } else if (cell_type == "CD8 Naive") {
+    change_threshold[[cell_type]] = 0.08
+    regulon_analysis[[cell_type]][["change_threshold"]] = change_threshold[[cell_type]]
+  } else if (cell_type == "CD4 TCM") {
+    change_threshold[[cell_type]] = 0.11
+    regulon_analysis[[cell_type]][["change_threshold"]] = change_threshold[[cell_type]]
+  }
+}
+
+### Get iGRN
+iGRN = list()
+for (cell_type in cell_types) {
+  interest_cell_type_iGRN <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/3 get sGRN/interest_cell_type_sGRN.rds"))
+  iGRN[[cell_type]] = interest_cell_type_iGRN[[cell_type]]; rm(interest_cell_type_iGRN)
+  
+  regulon_analysis[[cell_type]][["iGRN"]] = iGRN[[cell_type]]
+}
+
+### Get pGRN
+pGRN = list()
+for (cell_type in cell_types) {
+  interest_cell_type_branch_model_train <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/4.2 BUild Prediction Model - Model Training And Evaluation/interest_cell_type_branch_model_train.rds"))
+  pred_result = interest_cell_type_branch_model_train[[cell_type]][["best_pred_result"]][["pred_result"]]; rm(interest_cell_type_branch_model_train)
+  pGRN[[cell_type]] = iGRN[[cell_type]]
+  pGRN[[cell_type]][, ] = 0
+  for (TG in rownames(pGRN[[cell_type]])) {
+    for (TF in colnames(pGRN[[cell_type]])) {
+      theta = paste0("TG_", TG, "←", TF, "_TF")
+      if (theta %in% rownames(pred_result)) {
+        pGRN[[cell_type]][TG, TF] = pred_result[theta, "theta_p"]
+      }
+    }
+  }; rm(TG, TF, theta, pred_result)
+  
+  regulon_analysis[[cell_type]][["pGRN"]] = pGRN[[cell_type]]
+}
+
+### Get regulon
+for (cell_type in cell_types) {
+  change_threshold = regulon_analysis[[cell_type]][["change_threshold"]]
+  iGRN = regulon_analysis[[cell_type]][["iGRN"]]
+  pGRN = regulon_analysis[[cell_type]][["pGRN"]]
+  
+  regulon_list = list()
+  for (TG in sort(intersect(rownames(iGRN), rownames(pGRN)))) {
+    regulon_list[[paste0("TG_", TG, "_regulon")]] = list()
+    regulon_list[[paste0("TG_", TG, "_regulon")]][["genes"]] = c(
+      TG, setdiff(sort(base::union(names(iGRN[TG, ])[which(iGRN[TG, ] != 0)], 
+                                   names(pGRN[TG, ])[which(pGRN[TG, ] != 0)])), TG)
+    )
+    regulon_list[[paste0("TG_", TG, "_regulon")]][["average_standard_theta"]] = mean(iGRN[TG, ][iGRN[TG, ] != 0])
+    regulon_list[[paste0("TG_", TG, "_regulon")]][["average_predictive_theta"]] = mean(pGRN[TG, ][pGRN[TG, ] != 0])
+  }
+  for (TFG in sort(intersect(colnames(iGRN), colnames(pGRN)))) {
+    regulon_list[[paste0("TFG_", TFG, "_regulon")]] = list()
+    regulon_list[[paste0("TFG_", TFG, "_regulon")]][["genes"]] = c(
+      TFG, setdiff(sort(base::union(rownames(iGRN[, TFG, drop = F])[which(iGRN[, TFG] != 0)], 
+                                    rownames(pGRN[, TFG, drop = F])[which(pGRN[, TFG] != 0)])), TFG)
+    )
+    regulon_list[[paste0("TFG_", TFG, "_regulon")]][["average_standard_theta"]] = mean(iGRN[, TFG][iGRN[, TFG] != 0])
+    regulon_list[[paste0("TFG_", TFG, "_regulon")]][["average_predictive_theta"]] = mean(pGRN[, TFG][pGRN[, TFG] != 0])
+  }
+  # rm(iGRN, pGRN)
+  for (regulon in names(regulon_list)) {
+    if (length(regulon_list[[regulon]][["genes"]]) <= 1) {
+      regulon_list[[regulon]] = NULL
+    }
+  }
+  
+  regulon_df = as.data.frame(matrix(0, nrow = length(regulon_list), ncol = 3, dimnames = list(NULL, c("regulon", "stheta", "ptheta"))))
+  regulon_df$regulon = names(regulon_list)
+  for (i in 1:nrow(regulon_df)) {
+    regulon = regulon_df[i, "regulon"]
+    regulon_df[i, "stheta"] = regulon_list[[regulon]][["average_standard_theta"]]
+    regulon_df[i, "ptheta"] = regulon_list[[regulon]][["average_predictive_theta"]]
+  }; rm(i)
+  regulon_df[is.na(regulon_df)] = 1e-3
+  regulon_df[, "FoldChange"] = round(regulon_df$ptheta / regulon_df$stheta, digits = 3)
+  regulon_df$group <- ifelse(regulon_df$FoldChange > 1 + change_threshold, "Up",
+                             ifelse(regulon_df$FoldChange < 1 - change_threshold, "Down", "Median"))
+  
+  regulon_up_list = list()
+  up_regulons = regulon_df %>% filter(group == "Up") %>% pull(regulon)
+  if (length(up_regulons) > 0) {
+    for (up_regulon in up_regulons) {
+      regulon_up_list[[up_regulon]] = regulon_list[[up_regulon]]
+    }; rm(up_regulon)
+  }
+  
+  regulon_down_list = list()
+  down_regulons = regulon_df %>% filter(group == "Down") %>% pull(regulon)
+  if (length(down_regulons) > 0) {
+    for (down_regulon in down_regulons) {
+      regulon_down_list[[down_regulon]] = regulon_list[[down_regulon]]
+    }; rm(down_regulon)
+  }
+  
+  regulon_analysis[[cell_type]][["regulon_list"]] = regulon_list
+  regulon_analysis[[cell_type]][["regulon_up_list"]] = regulon_up_list
+  regulon_analysis[[cell_type]][["regulon_down_list"]] = regulon_down_list
+  regulon_analysis[[cell_type]][["regulon_df"]] = regulon_df
+}
+
+
+########## 3.2 Differential analysis of theta in regulons between iGRN and pGRN ##########
+# 分布图
+for (cell_type in cell_types) {
+  regulon_df = regulon_analysis[[cell_type]][["regulon_df"]]
+  
+  colnames(regulon_df)[2:3] = c("iGRN", "pGRN")
+  theta_distribution_plot <- ggplot(regulon_df %>% tidyr::pivot_longer(
+    cols = c("iGRN", "pGRN"), names_to = "variable", values_to = "value"
+  ), aes(x = value, fill = variable, color = variable)) +
+    # geom_histogram(aes(y = after_stat(density)), bins = 30, alpha = 0.2, position = "identity") +
+    geom_density(linewidth = 0.6, alpha = 0.2, adjust = 1) +
+    scale_fill_manual(name = "", values = c("iGRN" = "#69b3a2", "pGRN" = "#E69F00")) +
+    scale_color_manual(name = "", values = c("iGRN" = "#69b3a2", "pGRN" = "#E69F00")) +
+    labs(
+      title = paste0(cell_type, " θ Frequency Distribution Histogram and Kernel Density Curve"),
+      x = "θ", 
+      y = "Density"
+    ) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, size = 10), legend.position = "top")
+  print(theta_distribution_plot)
+  ggsave(filename = paste0("./Results/4 enrichment/", cell_type, " θ distribution plot.png"), plot = theta_distribution_plot, 
+         width = 4, height = 3, dpi = 600) # Normal distribution
+  
+  regulon_analysis[[cell_type]][["theta_distribution_plot"]] = theta_distribution_plot
+}; rm(theta_distribution_plot)
+
+### FC bidirectional bar chart
+for (cell_type in cell_types) {
+  regulon_df = regulon_analysis[[cell_type]][["regulon_df"]]
+  
+  regulon_df_plot <- regulon_df[regulon_df$group %in% c("Down", "Up"), ] %>% # 1. Filter data and create centered plot values (FoldChange - 1, making 1 become 0)
+    mutate(PlotValue = FoldChange - 1)
+  regulon_df_plot$group <- factor(regulon_df_plot$group, levels = c("Down", "Up")) # 2. Ensure correct grouping factor levels
+  
+  if (cell_type == "CD14 Mono") {text_size = 2.4} else 
+    if (cell_type == "CD4 Naive") {text_size = 2.4} else 
+      if (cell_type == "CD8 Naive") {text_size = 2.4} else 
+        if (cell_type == "CD4 TCM") {text_size = 1.6}
+  
+  theta_differential_bidirectional_barplot = ggplot(regulon_df_plot, # 3. Draw bidirectional bar chart with 1 as central axis and add data labels
+                                                    aes(x = reorder(regulon, PlotValue), 
+                                                        y = PlotValue, 
+                                                        fill = group)) +
+    geom_col() + # Draw bar chart
+    
+    # Add data labels: determine label position and display content based on positive/negative PlotValue
+    geom_text(aes(label = round(FoldChange, 2), # Display original FoldChange value, keep 2 decimal places
+                  y = ifelse(PlotValue > 0, PlotValue + 0.02, PlotValue - 0.02)),  # Slight offset to prevent overlap
+              size = text_size) +
+    geom_hline(yintercept = 0, color = "darkorange", linetype = "solid", size = 1) + 
+    coord_flip() + # Flip coordinates to make bars horizontal, Y-axis labels clearer
+    
+    # Set Y-axis (i.e., flipped X-axis) range: limit centered values to achieve original value range 0.65-1.35
+    coord_cartesian(ylim = c(-0.35, 0.35)) + 
+    scale_y_continuous(
+      # Set ticks and labels, map back to original FoldChange values
+      breaks = c(-0.4, -0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4),
+      labels = c(0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4) # Map back to original FoldChange values
+    ) +
+    
+    scale_fill_manual(values = c("Down" = "blue", "Up" = "red")) + # Set fill colors
+    
+    labs(x = "Regulon", 
+         y = "Fold Change", 
+         title = "Regulon Average θ Fold Change",
+         fill = "pGRN compared to iGRN") +
+    theme_minimal() +
+    
+    theme(axis.text.y = element_text(size = 10),
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 7), # Rotate original Y-axis (Fold Change value) labels 45 degrees
+          legend.position = "top", 
+          legend.justification = c(1, 0),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 9),
+          legend.key.size = unit(0.5, "cm"),
+          legend.spacing.x = unit(0.5, 'cm'),
+          plot.title = element_text(hjust = 0.5, size = 12))
+  
+  print(theta_differential_bidirectional_barplot)
+  ggsave(filename = paste0("./Results/4 enrichment/", cell_type, " θ differential bidirectional barplot.png"), plot = theta_differential_bidirectional_barplot, 
+         width = 4, height = 4, dpi = 600) # Normal distribution
+  
+  regulon_analysis[[cell_type]][["theta_differential_bidirectional_barplot"]] = theta_differential_bidirectional_barplot
+}; rm(regulon_df_plot)
+
+
+########## 3.3 Enrichment analysis of differential regulons in iGRM and pGRN ##########
+### Enrichment analysis
+options(timeout = 60000)
+for (cell_type in cell_types) {
+  regulon_up_list = regulon_analysis[[cell_type]][["regulon_up_list"]]
+  regulon_down_list = regulon_analysis[[cell_type]][["regulon_down_list"]]
+  
+  for (direction in c("up", "down")) {
+    if (direction == "up") {Regulon_list = regulon_up_list} else {Regulon_list = regulon_down_list}
+    if (length(Regulon_list) == 0) {next}
+    
+    i = 0
+    for (regulon in names(Regulon_list)) {
+      i = i + 1
+      message(paste0(i, "th regulon in ", length(Regulon_list), " ", direction, " regulons: ", regulon))
+      
+      regulon_SYMBOL = Regulon_list[[regulon]][["genes"]]
+      regulon_ENTREZID <- bitr(regulon_SYMBOL, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)[, "ENTREZID"]
+      main_gene_SYMBOL = regulon_SYMBOL[1]
+      
+      enrich_regulon = enrichGO_key_genes_all
+      enrich_regulon@result <- enrich_regulon@result[FALSE, ]
+      enrich_regulon@result$ONTOLOGY = NULL
+      enrich_regulon@ontology = "ALL"
+      enrich_regulon@gene = regulon_SYMBOL
+      enrich_regulon@universe = character(0)
+      enrich_regulon@geneSets = list()
+      
+      ### GO enrichment analysis
+      enrichGO_regulon <- tryCatch(
+        enrichGO(gene = regulon_SYMBOL, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "ALL", minGSSize = 2, readable = TRUE, 
+                 pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"),
+        error = function(e) {message(e$message); return(NULL) }
+      )
+      if (!is.null(enrichGO_regulon)) {
+        enrichGO_regulon@result <- enrichGO_regulon@result[
+          grepl(main_gene_SYMBOL, enrichGO_regulon@result$geneID) & enrichGO_regulon@result$Count > 1, ]
+        if (nrow(enrichGO_regulon@result) > 0) {
+          enrichGO_regulon@result$ID = paste(enrichGO_regulon@result$ONTOLOGY, enrichGO_regulon@result$ID, sep = ".")
+          enrichGO_regulon@result$ONTOLOGY = NULL
+          enrich_regulon@result <- rbind(enrich_regulon@result, enrichGO_regulon@result)
+        }
+      }
+      
+      ### KEGG enrichment analysis
+      enrichKEGG_regulon <- tryCatch(
+        enrichKEGG(gene = regulon_ENTREZID, keyType = "kegg", organism = "hsa", minGSSize = 2, use_internal_data = FALSE, 
+                   pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"),
+        error = function(e) { message(e$message); return(NULL) }
+      )
+      if (!is.null(enrichKEGG_regulon)) {
+        enrichKEGG_regulon <- setReadable(enrichKEGG_regulon, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+        enrichKEGG_regulon@result <- enrichKEGG_regulon@result[
+          grepl(main_gene_SYMBOL, enrichKEGG_regulon@result$geneID) & enrichKEGG_regulon@result$Count > 1, ]
+        if (nrow(enrichKEGG_regulon@result) > 0) {
+          enrichKEGG_regulon@result$ID = paste(
+            enrichKEGG_regulon@result$category, enrichKEGG_regulon@result$subcategory, enrichKEGG_regulon@result$ID, sep = ".")
+          enrichKEGG_regulon@result$category = NULL
+          enrichKEGG_regulon@result$subcategory = NULL
+          enrich_regulon@result <- rbind(enrich_regulon@result, enrichKEGG_regulon@result)
+        }
+      }
+      
+      ### KEGG module enrichment analysis
+      enrichMKEGG_regulon <- tryCatch(
+        enrichMKEGG(gene = regulon_ENTREZID, keyType = "kegg", organism = "hsa", minGSSize = 2, 
+                    pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"),
+        error = function(e) { message(e$message); return(NULL) }
+      )
+      if (!is.null(enrichMKEGG_regulon)) {
+        enrichMKEGG_regulon <- setReadable(enrichMKEGG_regulon, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+        enrichMKEGG_regulon@result <- enrichMKEGG_regulon@result[
+          grepl(main_gene_SYMBOL, enrichMKEGG_regulon@result$geneID) & enrichMKEGG_regulon@result$Count > 1, ]
+        if (nrow(enrichMKEGG_regulon@result) > 0) {
+          enrich_regulon@result <- rbind(enrich_regulon@result, enrichMKEGG_regulon@result)
+        }
+      }
+      
+      ### Pathway Commons enrichment analysis, including but not limited to: pathway databases KEGG Pathway, Reactome, PANTHER Pathway, WikiPathways, NCI Pathway Interaction Database, NetPath; protein-protein interaction (PPI) databases BioGRID, HPRD, IntAct
+      enrichPC_regulon <- tryCatch(
+        enrichPC(gene = regulon_SYMBOL, minGSSize = 2, pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"),
+        error = function(e) { message(e$message); return(NULL) }
+      )
+      if (!is.null(enrichPC_regulon)) {
+        enrichPC_regulon@result <- enrichPC_regulon@result[
+          grepl(main_gene_SYMBOL, enrichPC_regulon@result$geneID) & enrichPC_regulon@result$Count > 1, ]
+        if (nrow(enrichPC_regulon@result) > 0) {
+          enrich_regulon@result <- rbind(enrich_regulon@result, enrichPC_regulon@result)
+        }
+      }
+      
+      ### WikiPathways enrichment analysis
+      enrichWP_regulon <- tryCatch(
+        # enrichWP(gene = regulon_ENTREZID, organism = "Homo sapiens", minGSSize = 2, pvalueCutoff = 0.05, qvalueCutoff = 0.2, pAdjustMethod = "BH"),
+        enricher(
+          gene = regulon_ENTREZID,
+          pvalueCutoff = 0.05,
+          pAdjustMethod = "BH",
+          minGSSize = 2,
+          qvalueCutoff = 0.2,
+          TERM2GENE = wp_gmt
+        ),
+        error = function(e) { message(e$message); return(NULL) }
+      )
+      if (!is.null(enrichWP_regulon)) {
+        enrichWP_regulon <- setReadable(enrichWP_regulon, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+        enrichWP_regulon@result <- enrichWP_regulon@result[
+          grepl(main_gene_SYMBOL, enrichWP_regulon@result$geneID) & enrichWP_regulon@result$Count > 1, ]
+        if (nrow(enrichWP_regulon@result) > 0) {
+          enrich_regulon@result <- rbind(enrich_regulon@result, enrichWP_regulon@result)
+        }
+      }
+      
+      Regulon_list[[regulon]][["enrich"]] = enrich_regulon
+      
+      if (direction == "up") {regulon_up_list = Regulon_list} else {regulon_down_list = Regulon_list}
+      
+      regulon_analysis[[cell_type]][[paste0("regulon_", direction, "_list")]] = Regulon_list
+    }
+  }; rm(Regulon_list, enrich_regulon)
+  
+  base::saveRDS(regulon_up_list, file = paste0("./Results/4 enrichment/", gsub(" ", "_", cell_type), "_regulon_up_list.rds"))
+  base::saveRDS(regulon_down_list, file = paste0("./Results/4 enrichment/", gsub(" ", "_", cell_type), "_regulon_down_list.rds"))
+}
+# for (cell_type in cell_types) {
+#   regulon_analysis[[cell_type]][["regulon_up_list"]] = readRDS(paste0("./Results/4 enrichment/", gsub(" ", "_", cell_type), "_regulon_up_list.rds"))
+#   regulon_analysis[[cell_type]][["regulon_down_list"]] = readRDS(paste0("./Results/4 enrichment/", gsub(" ", "_", cell_type), "_regulon_down_list.rds"))
+# }
+base::saveRDS(regulon_analysis, file = "./Results/4 enrichment/regulon_analysis.rds")
+
+### Merge all enrichment analysis results
+for (cell_type in cell_types) {
+  regulon_up_list = regulon_analysis[[cell_type]][["regulon_up_list"]]
+  regulon_down_list = regulon_analysis[[cell_type]][["regulon_down_list"]]
+  enrichGO_key_genes_all = regulon_analysis[[cell_types[1]]][["regulon_up_list"]][[1]][["enrich"]]
+  
+  enrich_regulons = list()
+  for (direction in c("up", "down")) {
+    enrich__regulons = enrichGO_key_genes_all
+    enrich__regulons@result[1,] = 0
+    enrich__regulons@result = enrich__regulons@result[1,]
+    enrich__regulons@result$regulon <- 0
+    enrich__regulons@result <- enrich__regulons@result[FALSE, ]
+    enrich__regulons@result$ONTOLOGY = NULL
+    enrich__regulons@ontology = "ALL"
+    enrich__regulons@gene = character(0)
+    enrich__regulons@universe = character(0)
+    enrich__regulons@geneSets = list()
+    
+    if (direction == "up") {Regulon_list = regulon_up_list} else {Regulon_list = regulon_down_list}
+    
+    for (regulon in names(Regulon_list)) {
+      if (nrow(Regulon_list[[regulon]][["enrich"]]@result) > 0) {
+        Regulon_list[[regulon]][["enrich"]]@result[, "regulon"] = rep(regulon, nrow(Regulon_list[[regulon]][["enrich"]]@result))
+        enrich__regulons@result <- rbind(enrich__regulons@result, Regulon_list[[regulon]][["enrich"]]@result)
+      }
+    }
+    
+    enrich__regulons@result = enrich__regulons@result[, c("regulon", "ID", "Description", "GeneRatio", "BgRatio", "RichFactor", "FoldEnrichment", "zScore", "pvalue", "p.adjust", "qvalue", "geneID", "Count")]
+    enrich_regulons[[direction]] = enrich__regulons
+  }; rm(enrich__regulons, Regulon_list)
+  
+  regulon_analysis[[cell_type]][["enrich_regulons"]] = enrich_regulons
+}; rm(enrichGO_key_genes_all)
+
+### Filter results based on p-value
+for (cell_type in cell_types) {
+  enrich_regulons = regulon_analysis[[cell_type]][["enrich_regulons"]]
+  
+  enrich_regulons_filtered = enrich_regulons
+  for (direction in c("up", "down")) {
+    if (nrow(enrich_regulons_filtered[[direction]]@result) > 0) {
+      enrich_regulons_filtered[[direction]]@result = na.omit(enrich_regulons_filtered[[direction]]@result)
+      enrich_regulons_filtered[[direction]]@result = enrich_regulons_filtered[[direction]]@result[
+        enrich_regulons_filtered[[direction]]@result$pvalue < 0.05 & 
+          enrich_regulons_filtered[[direction]]@result$p.adjust < 0.05 & 
+          enrich_regulons_filtered[[direction]]@result$qvalue < 0.05, , drop = F]
+      enrich_regulons_filtered[[direction]]@result <- enrich_regulons_filtered[[direction]]@result %>% 
+        arrange(desc(FoldEnrichment), desc(Count), qvalue)
+    }
+  }
+  
+  regulon_analysis[[cell_type]][["enrich_regulons_filtered"]] = enrich_regulons_filtered
+}
+
+
+########## 3.4 Enrichment analysis plotting ##########
+library(enrichplot)
+library(ggplot2)
+# install.packages("ggh4x")
+library(ggh4x)
+# install.packages("ggpubr")
+library(ggpubr)
+
+### FoldEnrichment + p.adjust + count bubble plot
+for (cell_type in cell_types) {
+  for (direction in c("up", "down")) {
+    if (nrow(regulon_analysis[[cell_type]][["enrich_regulons_filtered"]][[direction]]@result) > 0) {
+      regulon_analysis[[cell_type]][["enrich_regulons_filtered"]][[direction]]@result$cell = cell_type
+    } else {
+      regulon_analysis[[cell_type]][["enrich_regulons_filtered"]][[direction]]@result$cell <- character(0)
+    }
+  }
+}
+
+enrich_regulons_filtered = list()
+for (direction in c("up", "down")) {
+  enrich_regulons_filtered[[direction]] = regulon_analysis[[1]][["enrich_regulons_filtered"]][["up"]]
+  enrich_regulons_filtered[[direction]]@result <- rbind(
+    regulon_analysis[[1]][["enrich_regulons_filtered"]][[direction]]@result,
+    regulon_analysis[[2]][["enrich_regulons_filtered"]][[direction]]@result,
+    regulon_analysis[[3]][["enrich_regulons_filtered"]][[direction]]@result,
+    regulon_analysis[[4]][["enrich_regulons_filtered"]][[direction]]@result
+  )
+  
+  if (nrow(enrich_regulons_filtered[[direction]]@result) > 0) {
+    enrich_regulons_filtered[[direction]]@result$logFoldEnrichment = log(enrich_regulons_filtered[[direction]]@result$FoldEnrichment)
+    enrich_regulons_filtered[[direction]]@result = subset(enrich_regulons_filtered[[direction]]@result, logFoldEnrichment > 3)
+    dotplot_regulons_showCategory = nrow(enrich_regulons_filtered[[direction]]@result)
+    dotplot_regulons = dotplot(
+      enrich_regulons_filtered[[direction]], 
+      x = "logFoldEnrichment",
+      color = "qvalue",
+      size = "Count",
+      showCategory = dotplot_regulons_showCategory,
+      title = paste0(" θ-", direction, " Regulon Enrichment Dotplot"),
+      label_format = 90
+    )  + facet_wrap(~ cell, nrow = length(unique(enrich_regulons_filtered[[direction]]@result$cell)), scales = "free_y") + 
+      force_panelsizes(
+        rows = as.numeric(table(enrich_regulons_filtered[[direction]]@result$cell)) / sum(as.numeric(table(enrich_regulons_filtered[[direction]]@result$cell))),
+        cols = 0.8,
+        respect = FALSE
+      ) + theme(axis.text.y = element_text(size = 5), plot.title = element_text(hjust = 0.5))
+    print(dotplot_regulons)
+    ggsave(filename = paste0("./Results/4 enrichment/θ_", direction, "_Regulons_Enrichment_Dotplot.png"), plot = dotplot_regulons, 
+           width = 5, height = 10, limitsize = FALSE, dpi = 900)
+    
+    regulon_analysis[[direction]][["Regulons_Enrichment_Dotplot"]] = dotplot_regulons
+    regulon_analysis[[direction]][["enrich_regulons_filtered"]] = enrich_regulons_filtered[[direction]]
+  }
+}; rm(dotplot_regulons)
+
+base::saveRDS(regulon_analysis, file = "./Results/4 enrichment/regulon_analysis.rds")
+
+for (direction in c("up", "down")) {
+  openxlsx::write.xlsx(
+    regulon_analysis[[direction]][["enrich_regulons_filtered"]]@result, 
+    file = paste0("./Results/4 enrichment/enrich_", direction, "_regulons_filtered.xlsx"), 
+    rowNames = FALSE,
+    colNames = TRUE
+  )
+}

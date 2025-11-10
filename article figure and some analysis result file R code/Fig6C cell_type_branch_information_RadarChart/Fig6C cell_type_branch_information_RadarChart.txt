@@ -1,0 +1,230 @@
+# library(SeuratObject)
+library(fmsb)
+library(scales)
+# library(ggsci)
+
+library(tibble)
+
+setwd("D:/pbmc-equation/")
+# setwd("/mnt/d/pbmc-equation/")
+
+for (cell_type in c("CD14 Mono", "CD4 Naive", "CD8 Naive", "CD4 TCM")) {
+  Basic_Info <- readRDS("./pr50 newest for paper/1.3 Data Preprocessing - Get Expression And Activity Matrix/Basic_Info.rds")
+  interest_cell_type_group <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/2.2 Data Processing - Cell Grouping/interest_cell_type_group.rds"))
+  interest_cell_type_branch_iGRN <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/3 get sGRN/interest_cell_type_branch_sGRN.rds"))
+  interest_cell_type_iGRN <- readRDS(paste0("./pr50 newest for paper/", cell_type, " result pr50/3 get sGRN/interest_cell_type_sGRN.rds"))
+
+  if (cell_type == "CD14 Mono"){
+    branches = c("1→2", "1→3", "All")
+  } else if (cell_type == "CD4 Naive") {
+    branches = c("1→5", "1→2→3", "1→2→4", "All")
+  } else if (cell_type == "CD8 Naive") {
+    branches = c("1→9", "1→2→3→4", "1→2→3→5", "1→2→6→7", "1→2→6→8", "All")
+  } else if (cell_type == "CD4 TCM") {
+    branches = c("1→11", "1→2→10", "1→2→3→9", "1→2→3→4→8", "1→2→3→4→5→6", "1→2→3→4→5→7", "All")
+  }
+  
+  branch_radar = as.data.frame(
+    matrix(0, nrow = length(branches), ncol = 6, 
+           dimnames = list(branches, c("Cells", "Groups", "n_min", "TFGs", "TGs", "θ+ ratio"))))
+  
+  for (n in 1:(length(branches) - 1)) {
+    branch_radar[n, "Cells"] = sum(interest_cell_type_group[[cell_type]][["Branches_n_k"]][[n]])
+    branch_radar[n, "Groups"] = interest_cell_type_group[[cell_type]][["Branches_n_group"]][[n]]
+    branch_radar[n, "n_min"] = interest_cell_type_group[[cell_type]][["n_min"]][n]
+    branch_radar[n, "TFGs"] = nrow(interest_cell_type_group[[cell_type]][["Branches_TFE_T"]][[n]])
+    branch_radar[n, "TGs"] = nrow(interest_cell_type_group[[cell_type]][["Branches_TGE_T"]][[n]])
+    X = interest_cell_type_branch_iGRN[[cell_type]][[n]]
+    all_values <- as.numeric(unlist(X))
+    non_zero <- all_values[all_values != 0]
+    branch_radar[n, "θ+ ratio"] = round(length(non_zero) / length(all_values), digits = 3)
+  }; rm(n, X, all_values, non_zero)
+  
+  branch_radar["All", "Cells"] = table(Basic_Info[["scRNAseq_for_GRN"]]@meta.data$seurat_annotations)[cell_type]
+  branch_radar["All", "Groups"] = 0
+  branch_radar["All", "n_min"] = 0
+  branch_radar["All", "TFGs"] = ncol(interest_cell_type_iGRN[[cell_type]])
+  branch_radar["All", "TGs"] = nrow(interest_cell_type_iGRN[[cell_type]])
+  X = interest_cell_type_iGRN[[cell_type]]
+  all_values <- as.numeric(unlist(X))
+  non_zero <- all_values[all_values != 0]
+  branch_radar["All", "θ+ ratio"] = round(length(non_zero) / length(all_values), digits = 3); rm(X, all_values, non_zero)
+  
+  branch_radar = rownames_to_column(branch_radar, "Branch")
+  branch_radar = as.data.frame(base::t(branch_radar))
+  branch_radar = rownames_to_column(branch_radar, "Branch")
+  colnames(branch_radar) = branch_radar[1,]
+  branch_radar = branch_radar[-1, ]
+  
+  branch_radar[, "max_value"] <- as.numeric(apply(branch_radar[, -1], 1, max)) * 1.015
+  branch_radar[branch_radar$Branch %in% c("Cells", "Groups", "n_min", "TFGs", "TGs"), "max_value"] = 
+    ceiling(branch_radar[branch_radar$Branch %in% c("Cells", "Groups", "n_min", "TFGs", "TGs"), "max_value"])
+  branch_radar[branch_radar$Branch %in% c("θ+ ratio"), "max_value"] = ceiling(branch_radar[branch_radar$Branch %in% c("θ+ ratio"), "max_value"] * 1000) / 1000
+  branch_radar = branch_radar[, c(1, ncol(branch_radar), 2:(ncol(branch_radar) - 1))]
+  
+  branch_radar[2, "All"] <- round(weighted.mean(as.numeric(branch_radar[2, 3:(ncol(branch_radar) - 1)]), 
+                                                as.numeric(branch_radar[1, 3:(ncol(branch_radar) - 1)])), digits = 1)
+  branch_radar[3, "All"] <- round(weighted.mean(as.numeric(branch_radar[3, 3:(ncol(branch_radar) - 1)]), 
+                                                as.numeric(branch_radar[1, 3:(ncol(branch_radar) - 1)])), digits = 1)
+  
+  branch_radar = branch_radar[c(2:6, 1), ]
+  
+  min_value = as.numeric(apply(branch_radar[, 3:(ncol(branch_radar))], 1, min)) * 0.985
+  names(min_value) = branch_radar$Branch
+  min_value[c("Cells", "Groups", "n_min", "TFGs", "TGs")] = 
+    floor(min_value[c("Cells", "Groups", "n_min", "TFGs", "TGs")])
+  min_value["θ+ ratio"] = floor(min_value["θ+ ratio"] * 1000) / 1000
+  
+  print(branch_radar)
+  print(min_value)
+  
+  rownames(branch_radar) = branch_radar[, "Branch"]
+  branch_radar[, "min_value"] = min_value
+  branch_radar = branch_radar[, c(2, ncol(branch_radar), 3:(ncol(branch_radar)-1))]
+  
+  branch_radar = as.data.frame(t(branch_radar))
+  rowname = rownames(branch_radar)
+  # branch_radar <- as.data.frame(lapply(branch_radar, as.numeric))
+  branch_radar <- as.data.frame(dplyr::mutate_all(branch_radar,as.numeric))
+  rownames(branch_radar) = rowname
+  print(branch_radar)
+  
+  # Data must be given as the data frame, where the first cases show maximum.
+  dat = branch_radar
+  data = dat[3:nrow(dat), ]
+  max_min = dat[1:2, ]
+  
+  generate_distinct_colors <- function(n, method = "auto") {
+    if (method == "auto") {
+      # Automatically select the best method based on n size
+      if (n <= 8) {
+        return(RColorBrewer::brewer.pal(n, "Set2"))
+      } else if (n <= 12) {
+        return(RColorBrewer::brewer.pal(n, "Set3"))
+      } else {
+        # For large number of colors, use HSV method
+        hues <- seq(0, 1, length.out = n + 1)[1:n]
+        return(hsv(h = hues, s = 0.8, v = 0.9))
+      }
+    } else if (method == "brewer") {
+      if (!require(RColorBrewer)) install.packages("RColorBrewer")
+      qual_col_pals <- brewer.pal.info[brewer.pal.info$category == "qual", ]
+      col_vector <- unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+      if (n > length(col_vector)) {
+        return(colorRampPalette(col_vector)(n))
+      } else {
+        return(col_vector[1:n])
+      }
+    } else if (method == "viridis") {
+      if (!require(viridis)) install.packages("viridis")
+      return(viridis(n))
+    } else if (method == "hsv") {
+      hues <- seq(0, 1, length.out = n + 1)[1:n]
+      return(hsv(h = hues, s = 0.8, v = 0.9))
+    } else {
+      stop("Unknown method. Please choose 'auto', 'brewer', 'viridis' or 'hsv'.")
+    }
+  }
+  colors <- generate_distinct_colors(nrow(dat) - 2, method = "auto")
+  make_color_darker_hcl <- function(hex_color, lightness_reduction = 10) {
+    # Convert hex code to HCL coordinates
+    hcl_vec <- rgb2hsv(col2rgb(hex_color))
+    hcl_mtx <- matrix(hcl_vec, nrow=3, dimnames=list(c("h","s","v"), NULL))
+    # educe brightness value (V represents Value/brightness)
+    hcl_mtx["v", ] <- hcl_mtx["v", ] * (1 - lightness_reduction/100)
+    # Convert HSV back to hex color code
+    return(hsv(h = hcl_mtx["h", ], s = hcl_mtx["s", ], v = hcl_mtx["v", ]))
+  }
+  colors <- make_color_darker_hcl(colors, lightness_reduction = 25)
+  
+  # colors_fill <- c(alpha("#00AFBB", 0.3), alpha("#FC4E07", 0.3))  # Semi-transparent fill colors
+  
+  png(filename = paste0("./Results/2 branch/", gsub(" ", "_", cell_type), "_branches_information_radar_chart.png"), 
+      width = 16, 
+      height = 6.5 * 5/4, 
+      units = "in", 
+      res = 600)
+  
+  radarchart(
+    # Basic structure of radar chart data and axis form
+    df = dat, 
+    axistype = 0, 
+    maxmin = TRUE,
+    # centerzero = FALSE,
+    centerzero = TRUE,
+    seg = 4,
+    na.itp = FALSE,
+    
+    # Data series style
+    # pcol = 1:nrow(dat),
+    pcol = colors,
+    plwd = 2,
+    plty = 1,
+    pfcol = NA,
+    pty = 32, # Dot 16
+    pdensity = NULL,
+    pangle = 45,
+    
+    # Grid and background
+    cglty = 2,
+    cglwd = 1,
+    cglcol = "grey",
+    
+    # Labels and title
+    vlabels = colnames(dat),
+    vlcex = 1.5,
+    caxislabels = NULL,
+    calcex = NULL,
+    paxislabels = NULL,
+    palcex = NULL,
+    axislabcol = "blue",
+    title = paste0(cell_type, " Branches Information Radar Chart")
+  )
+  
+  # Add legend
+  legend(
+    # x = "bottom",
+    # x = -1.35,
+    x = 0,
+    y = 1.33,
+    xjust = 0.5,       # Horizontal center
+    yjust = 0.5,       # Align from top (legend above points)
+    legend = rownames(data), 
+    bty = "n",         # No border
+    pch = 16,          # Dot style
+    # lty = 0.6,
+    col = colors, 
+    text.col = "black", 
+    cex = 1,           # Font size 0.6
+    pt.cex = 1.5,      # Dot size
+    xpd = TRUE,
+    horiz = TRUE,
+    # ncol = 5           # Number of legends per row
+    # x.intersp = 0.3,   # Reduce spacing between symbols and text
+    text.width = 0.6,  # Control width of each label
+    adj = c(0, 0.5)    # Ensure left-aligned text
+  )
+  
+  # Add value labels
+  # Calculate position of each data point on radar chart and add text labels
+  for (i in 1:nrow(data)) {
+    for (j in 1:ncol(data)) {
+      # Calculate normalized value (0-1 range)
+      value_normalized <- (data[i, j] - max_min["min_value", j]) / (max_min["max_value", j] - max_min["min_value", j])
+      
+      # Calculate angle (three indicators evenly divide 360 degrees)
+      angle <- 2 * pi - (j - 1) * 2 * pi / ncol(data)
+      
+      # Calculate coordinates
+      x <- value_normalized * sin(angle)
+      y <- value_normalized * cos(angle)
+      
+      # Add text labels
+      text(x, y, labels = data[i, j], cex = 1.2, col = colors[i],
+           # pos = 3, offset = 0.8
+      )
+    }
+  }
+  
+  dev.off()
+}
