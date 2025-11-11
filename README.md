@@ -67,5 +67,5 @@ The model training process is **extremely computationally intensive**.
 
 *   Specific Guidelines (Code, Data, and Results Availability) is in https://github.com/hth-buaa/scDEDS-code-data-and-result/tree/main.
 *   See specific Guidelines in *article_experiment_R_code.txt* (it is also the code for experiment in the paper).
-*   See the experiment results of the paper in folder *article experiment result* (including the data used in paper). After the experimental process is completed, generate *code4.2.RData* in folder *4.2 BUild Prediction Model - Model Training And Evaluation*.
+*   See the experiment results of the paper in folder *article experiment result* (including the data used in paper). 
 *   See the code for figures and some mediate analysis results in folder *article figure and some analysis result file R code*.
